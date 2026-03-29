@@ -19,6 +19,8 @@
       </span>
     </div>
     <div class="toolbar-group toolbar-center">
+
+      <!-- Transform Tools -->
       <button id="btn-translate" class="tool-btn active" title="Move (W)">
         <span class="material-symbols-rounded">open_with</span>
       </button>
@@ -32,71 +34,136 @@
       <button id="btn-vertex-edit" class="tool-btn" title="Vertex Edit Mode (V)">
         <span class="material-symbols-rounded">polyline</span>
       </button>
+
       <div class="toolbar-divider"></div>
-      <button class="tool-btn" id="btn-snap" title="Toggle Snap (S)">
-        <span class="material-symbols-rounded">grid_guides</span>
-      </button>
-      <div class="toolbar-divider"></div>
-      <div class="toolbar-group">
-        <span style="font-size:10px;color:var(--text-muted);margin-right:4px">Grid Size</span>
-        <input type="number" id="input-grid-size" value="32" step="8" min="4" max="256" style="width:50px;height:28px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);padding:0 6px;font-family:monospace;font-size:11px">
+
+      <!-- Add dropdown -->
+      <div class="menu-group">
+        <button class="menu-btn" id="menu-btn-add">
+          <span class="material-symbols-rounded">add_box</span>
+          <span class="menu-label">Add</span>
+          <span class="material-symbols-rounded menu-arrow">expand_more</span>
+        </button>
+        <div class="dropdown" id="dropdown-add">
+          <div class="dropdown-section-label">Primitives</div>
+          <button id="btn-add-plane" class="dropdown-item">
+            <span class="material-symbols-rounded">rectangle</span>
+            Plane
+          </button>
+          <button id="btn-add-cube" class="dropdown-item">
+            <span class="material-symbols-rounded">deployed_code</span>
+            Cube
+          </button>
+          <button id="btn-add-cylinder" class="dropdown-item">
+            <span class="material-symbols-rounded">circle</span>
+            Cylinder
+          </button>
+        </div>
       </div>
+
       <div class="toolbar-divider"></div>
-      <button id="btn-grid" class="tool-btn active" title="Toggle Grid">
-        <span class="material-symbols-rounded">grid_3x3</span>
-      </button>
-      <div class="toolbar-divider"></div>
-      <div class="toolbar-group" style="align-items:center; display:flex; margin-right:4px;">
-        <span style="font-size:12px; color:var(--text-secondary); margin-right:4px;">Subdiv:</span>
-        <input type="number" id="input-segments" value="1" min="1" max="16" class="prop-input" style="width:40px; padding:2px 4px; border-radius:4px; text-align:center;">
+
+      <!-- View dropdown -->
+      <div class="menu-group">
+        <button class="menu-btn" id="menu-btn-view">
+          <span class="material-symbols-rounded">visibility</span>
+          <span class="menu-label">View</span>
+          <span class="material-symbols-rounded menu-arrow">expand_more</span>
+        </button>
+        <div class="dropdown" id="dropdown-view">
+          <div class="dropdown-section-label">Grid</div>
+          <button id="btn-grid" class="dropdown-item active">
+            <span class="material-symbols-rounded">grid_3x3</span>
+            Show Grid
+          </button>
+          <button id="btn-snap" class="dropdown-item">
+            <span class="material-symbols-rounded">grid_guides</span>
+            Snap to Grid
+            <span class="dropdown-shortcut">G</span>
+          </button>
+          <div class="dropdown-row">
+            <span>Grid Size</span>
+            <input type="number" id="input-grid-size" value="32" step="8" min="4" max="256">
+          </div>
+          <div class="dropdown-row">
+            <span>Subdivisions</span>
+            <input type="number" id="input-segments" value="1" min="1" max="16">
+          </div>
+          <div class="dropdown-divider"></div>
+          <div class="dropdown-section-label">Camera</div>
+          <button id="btn-camera-persp" class="dropdown-item active">
+            <span class="material-symbols-rounded">panorama_photosphere</span>
+            Perspective
+          </button>
+          <button id="btn-camera-ortho" class="dropdown-item">
+            <span class="material-symbols-rounded">crop_square</span>
+            Orthographic
+          </button>
+        </div>
       </div>
-      <button id="btn-add-plane" class="tool-btn" title="Add Plane">
-        <span class="material-symbols-rounded">rectangle</span>
-      </button>
-      <button id="btn-add-cube" class="tool-btn" title="Add Cube">
-        <span class="material-symbols-rounded">deployed_code</span>
-      </button>
-      <button id="btn-add-cylinder" class="tool-btn" title="Add Cylinder">
-        <span class="material-symbols-rounded">circle</span>
-      </button>
+
       <div class="toolbar-divider"></div>
-      <button id="btn-camera-persp" class="tool-btn active" title="Perspective Camera">
-        <span class="material-symbols-rounded">panorama_photosphere</span>
-      </button>
-      <button id="btn-camera-ortho" class="tool-btn" title="Orthographic Camera">
-        <span class="material-symbols-rounded">crop_square</span>
-      </button>
-      <div class="toolbar-divider"></div>
+
+      <!-- History -->
       <button id="btn-undo" class="tool-btn" title="Undo (Ctrl+Z)">
         <span class="material-symbols-rounded">undo</span>
       </button>
       <button id="btn-redo" class="tool-btn" title="Redo (Ctrl+Shift+Z)">
         <span class="material-symbols-rounded">redo</span>
       </button>
+
     </div>
     <div class="toolbar-group toolbar-right">
-      <button id="btn-save-project" class="export-btn" title="Save Project (.s3d)" style="margin-right:8px; border-color:var(--success); color:var(--success)">
-        <span class="material-symbols-rounded">save</span>
-        Save
-      </button>
-      <button id="btn-load-project" class="export-btn" title="Load Project (.s3d)" style="margin-right:16px;">
-        <span class="material-symbols-rounded">folder_open</span>
-        Load
-      </button>
+
+      <!-- Project dropdown -->
+      <div class="menu-group">
+        <button class="menu-btn menu-btn-success" id="menu-btn-project">
+          <span class="material-symbols-rounded">folder</span>
+          <span class="menu-label">Project</span>
+          <span class="material-symbols-rounded menu-arrow">expand_more</span>
+        </button>
+        <div class="dropdown dropdown-right" id="dropdown-project">
+          <button id="btn-save-project" class="dropdown-item dropdown-item-success">
+            <span class="material-symbols-rounded">save</span>
+            Save Project
+            <span class="dropdown-shortcut">.s3d</span>
+          </button>
+          <button id="btn-load-project" class="dropdown-item">
+            <span class="material-symbols-rounded">folder_open</span>
+            Load Project
+            <span class="dropdown-shortcut">.s3d</span>
+          </button>
+        </div>
+      </div>
       <input type="file" id="file-load-project" accept=".s3d" hidden>
-      
-      <button id="btn-export-gltf" class="export-btn" title="Export as GLTF">
-        <span class="material-symbols-rounded">download</span>
-        GLTF
-      </button>
-      <button id="btn-export-obj" class="export-btn" title="Export as OBJ">
-        <span class="material-symbols-rounded">download</span>
-        OBJ
-      </button>
-      <button id="btn-export-godot" class="export-btn" title="Export Godot MeshLibrary (.glb)" style="border-color:var(--accent); color:var(--accent)">
-        <span class="material-symbols-rounded">view_in_ar</span>
-        Godot GridMap
-      </button>
+
+      <div class="toolbar-divider"></div>
+
+      <!-- Export dropdown -->
+      <div class="menu-group">
+        <button class="menu-btn menu-btn-accent" id="menu-btn-export">
+          <span class="material-symbols-rounded">download</span>
+          <span class="menu-label">Export</span>
+          <span class="material-symbols-rounded menu-arrow">expand_more</span>
+        </button>
+        <div class="dropdown dropdown-right" id="dropdown-export">
+          <div class="dropdown-section-label">Format</div>
+          <button id="btn-export-gltf" class="dropdown-item">
+            <span class="material-symbols-rounded">download</span>
+            GLTF
+          </button>
+          <button id="btn-export-obj" class="dropdown-item">
+            <span class="material-symbols-rounded">download</span>
+            OBJ
+          </button>
+          <div class="dropdown-divider"></div>
+          <button id="btn-export-godot" class="dropdown-item dropdown-item-accent">
+            <span class="material-symbols-rounded">view_in_ar</span>
+            Godot GridMap
+          </button>
+        </div>
+      </div>
+
     </div>
   </header>
 

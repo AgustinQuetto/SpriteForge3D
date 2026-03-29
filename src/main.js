@@ -246,6 +246,7 @@ function placeAsset(asset, clientX, clientY) {
 
     if (scene.snapEnabled) {
       mesh.position.x = Math.round(mesh.position.x / scene.snapSize) * scene.snapSize;
+      mesh.position.y = Math.round(mesh.position.y / scene.snapSize) * scene.snapSize;
       mesh.position.z = Math.round(mesh.position.z / scene.snapSize) * scene.snapSize;
     }
   }
@@ -305,6 +306,7 @@ function placeAssetsGrid(assets, clientX, clientY) {
 
     if (scene.snapEnabled) {
       mesh.position.x = Math.round(mesh.position.x / scene.snapSize) * scene.snapSize;
+      mesh.position.y = Math.round(mesh.position.y / scene.snapSize) * scene.snapSize;
       mesh.position.z = Math.round(mesh.position.z / scene.snapSize) * scene.snapSize;
     }
 
@@ -980,3 +982,40 @@ animate();
 
 // Initial UI state
 showToast('Sprite3D ready — drop PNG files to begin');
+
+// ── Dropdown Menu System ──────────────────────────────────────────────────────
+const menuGroups = document.querySelectorAll('.menu-group');
+
+function closeAllDropdowns(except = null) {
+  menuGroups.forEach(group => {
+    if (group === except) return;
+    group.querySelector('.menu-btn')?.classList.remove('open');
+    group.querySelector('.dropdown')?.classList.remove('open');
+  });
+}
+
+menuGroups.forEach(group => {
+  const btn = group.querySelector('.menu-btn');
+  const dropdown = group.querySelector('.dropdown');
+  if (!btn || !dropdown) return;
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isOpen = dropdown.classList.contains('open');
+    closeAllDropdowns();
+    if (!isOpen) {
+      dropdown.classList.add('open');
+      btn.classList.add('open');
+    }
+  });
+
+  // Close dropdown when an action item is clicked (not inputs)
+  dropdown.querySelectorAll('.dropdown-item').forEach(item => {
+    item.addEventListener('click', () => closeAllDropdowns());
+  });
+
+  // Prevent clicks inside dropdown from bubbling to document close handler
+  dropdown.addEventListener('click', (e) => e.stopPropagation());
+});
+
+document.addEventListener('click', () => closeAllDropdowns());
