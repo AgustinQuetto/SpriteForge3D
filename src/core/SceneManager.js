@@ -325,6 +325,20 @@ export class SceneManager {
     return null;
   }
 
+  /**
+   * Like pickObject but returns the full intersection record, including face data.
+   * Used by PushPullTool to detect which face was hit.
+   */
+  pickFaceData(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    this.mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+    const intersects = this.raycaster.intersectObjects(this.objects, false);
+    return intersects[0] ?? null;
+  }
+
   getWorldPositionFromScreen(clientX, clientY) {
     const rect = this.canvas.getBoundingClientRect();
     this.mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;

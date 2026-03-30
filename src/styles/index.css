@@ -874,3 +874,16 @@ html, body {
 .dropdown-row input:focus {
   border-color: var(--accent);
 }
+
+/* ── Drawing Tool Cursors ──────────── */
+#viewport.cursor-crosshair {
+  cursor: crosshair !important;
+}
+
+#viewport.cursor-push-pull {
+  cursor: ns-resize !important;
+}
+
+#viewport.cursor-push-pull-active {
+  cursor: ns-resize !important;
+}

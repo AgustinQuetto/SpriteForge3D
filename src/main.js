@@ -10,6 +10,8 @@ import { OBJExportManager } from './export/OBJExportManager.js';
 import { GodotExportManager } from './export/GodotExportManager.js';
 import { VertexEditor } from './editor/VertexEditor.js';
 import { UVExporter } from './export/UVExporter.js';
+import { DrawingTool } from './editor/DrawingTool.js';
+import { PushPullTool } from './editor/PushPullTool.js';
 
 // ──────────────────────────────────────────────
 //  Initialize Systems
@@ -25,6 +27,72 @@ const vertexEditor = new VertexEditor(scene.scene);
 
 let activeTransformMode = 'translate';
 let isVertexEditMode = false;
+
+// Drawing & Push/Pull tools
+const drawingTool = new DrawingTool(scene);
+const pushPullTool = new PushPullTool(scene);
+
+// Current tool mode: 'transform' | 'line' | 'rectangle' | 'push-pull'
+let toolMode = 'transform';
+
+function setToolMode(mode) {
+  toolMode = mode;
+
+  // Deactivate previous modes
+  drawingTool.deactivate();
+  pushPullTool.deactivate();
+
+  const viewport = document.getElementById('viewport');
+  viewport.classList.remove('cursor-crosshair', 'cursor-push-pull');
+
+  // Reset draw button active states
+  ['btn-tool-line', 'btn-tool-rectangle', 'btn-tool-push-pull'].forEach(id => {
+    document.getElementById(id)?.classList.remove('active');
+  });
+
+  if (mode === 'line') {
+    drawingTool.activate('line');
+    viewport.classList.add('cursor-crosshair');
+    document.getElementById('btn-tool-line')?.classList.add('active');
+    showToast('Line Tool — click to place points, click start to close');
+  } else if (mode === 'rectangle') {
+    drawingTool.activate('rectangle');
+    viewport.classList.add('cursor-crosshair');
+    document.getElementById('btn-tool-rectangle')?.classList.add('active');
+    showToast('Rectangle Tool — click two corners to create a face');
+  } else if (mode === 'push-pull') {
+    pushPullTool.activate();
+    viewport.classList.add('cursor-push-pull');
+    document.getElementById('btn-tool-push-pull')?.classList.add('active');
+    scene.orbit.enabled = false;
+    showToast('Push/Pull — hover a face and drag to extrude');
+  } else {
+    // transform mode
+    scene.orbit.enabled = true;
+  }
+}
+
+// Wire face creation from drawing tool to scene + history
+drawingTool.onFaceCreated = (mesh) => {
+  scene.addObject(mesh);
+  scene.selectObject(mesh, false);
+  hierarchy.refresh();
+
+  history.push({
+    label: 'Draw Face',
+    undo: () => {
+      scene.removeObject(mesh);
+      scene.deselectObject();
+      hierarchy.refresh();
+    },
+    redo: () => {
+      scene.addObject(mesh);
+      scene.selectObject(mesh, false);
+      hierarchy.refresh();
+    },
+  });
+  showToast('Face created — use Push/Pull to extrude');
+};
 
 // ──────────────────────────────────────────────
 //  Callbacks & Wiring
@@ -115,9 +183,54 @@ hierarchy.onSelect = (obj) => {
 //  Canvas Click → Place or Select
 // ──────────────────────────────────────────────
 
+// ──────────────────────────────────────────────
+//  Canvas Mouse Events for Drawing & Push/Pull
+// ──────────────────────────────────────────────
+
+canvas.addEventListener('mousemove', (e) => {
+  if (toolMode === 'line' || toolMode === 'rectangle') {
+    const worldPos = scene.getWorldPositionFromScreen(e.clientX, e.clientY);
+    if (worldPos) drawingTool.onMouseMove(worldPos);
+  } else if (toolMode === 'push-pull') {
+    pushPullTool.onMouseMove(e.clientX, e.clientY);
+    // Update cursor based on whether a face is hovered
+    const viewport = document.getElementById('viewport');
+    viewport.classList.toggle('cursor-push-pull-active', !!pushPullTool._hoveredData);
+  }
+});
+
+canvas.addEventListener('mousedown', (e) => {
+  if (toolMode === 'push-pull' && e.button === 0) {
+    pushPullTool.onMouseDown(e.clientX, e.clientY);
+  }
+});
+
+canvas.addEventListener('mouseup', (e) => {
+  if (toolMode === 'push-pull' && e.button === 0) {
+    const result = pushPullTool.onMouseUp();
+    if (result) {
+      const { mesh, prevDepth, newDepth, faceNormal, materialIndex } = result;
+      history.push({
+        label: 'Push/Pull',
+        undo: () => pushPullTool._applyExtrusion(mesh, faceNormal, materialIndex, prevDepth),
+        redo: () => pushPullTool._applyExtrusion(mesh, faceNormal, materialIndex, newDepth),
+      });
+    }
+  }
+});
+
 canvas.addEventListener('click', (e) => {
   // Don't interfere with transform gizmo
   if (scene.transformControls.dragging) return;
+
+  // Route to drawing tools
+  if (toolMode === 'line' || toolMode === 'rectangle') {
+    const worldPos = scene.getWorldPositionFromScreen(e.clientX, e.clientY);
+    if (worldPos) drawingTool.onClick(worldPos);
+    return;
+  }
+
+  if (toolMode === 'push-pull') return; // handled by mousedown/up
 
   if (isVertexEditMode) {
     const picked = scene.pickObject(e.clientX, e.clientY, vertexEditor.controlPoints);
@@ -446,11 +559,18 @@ function setTransformBtn(mode) {
   scene.setTransformMode(mode);
   document.querySelectorAll('#btn-translate, #btn-rotate, #btn-scale').forEach(b => b.classList.remove('active'));
   document.getElementById(`btn-${mode}`).classList.add('active');
+  // Exit any active drawing/push-pull mode
+  if (toolMode !== 'transform') setToolMode('transform');
 }
 
 document.getElementById('btn-translate').addEventListener('click', () => setTransformBtn('translate'));
 document.getElementById('btn-rotate').addEventListener('click', () => setTransformBtn('rotate'));
 document.getElementById('btn-scale').addEventListener('click', () => setTransformBtn('scale'));
+
+// Draw tool buttons
+document.getElementById('btn-tool-line').addEventListener('click', () => setToolMode('line'));
+document.getElementById('btn-tool-rectangle').addEventListener('click', () => setToolMode('rectangle'));
+document.getElementById('btn-tool-push-pull').addEventListener('click', () => setToolMode('push-pull'));
 
 // Vertex Edit toggle
 document.getElementById('btn-vertex-edit').addEventListener('click', () => {
@@ -593,10 +713,24 @@ window.addEventListener('keydown', (e) => {
         }
       }
       break;
+    case 'l':
+      setToolMode('line');
+      break;
+    case 'b':
+      setToolMode('rectangle');
+      break;
+    case 'p':
+      setToolMode('push-pull');
+      break;
     case 'escape':
-      scene.deselectObject();
-      propsPanel.showEmpty();
-      hierarchy.refresh();
+      if (toolMode !== 'transform') {
+        setToolMode('transform');
+        showToast('Returned to Transform mode');
+      } else {
+        scene.deselectObject();
+        propsPanel.showEmpty();
+        hierarchy.refresh();
+      }
       break;
   }
 });

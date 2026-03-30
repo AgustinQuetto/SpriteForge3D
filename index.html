@@ -63,6 +63,36 @@
 
       <div class="toolbar-divider"></div>
 
+      <!-- Draw dropdown -->
+      <div class="menu-group">
+        <button class="menu-btn" id="menu-btn-draw">
+          <span class="material-symbols-rounded">edit</span>
+          <span class="menu-label">Draw</span>
+          <span class="material-symbols-rounded menu-arrow">expand_more</span>
+        </button>
+        <div class="dropdown" id="dropdown-draw">
+          <div class="dropdown-section-label">Shapes</div>
+          <button id="btn-tool-line" class="dropdown-item">
+            <span class="material-symbols-rounded">show_chart</span>
+            Line
+            <span class="dropdown-shortcut">L</span>
+          </button>
+          <button id="btn-tool-rectangle" class="dropdown-item">
+            <span class="material-symbols-rounded">rectangle</span>
+            Rectangle
+            <span class="dropdown-shortcut">B</span>
+          </button>
+          <div class="dropdown-divider"></div>
+          <button id="btn-tool-push-pull" class="dropdown-item">
+            <span class="material-symbols-rounded">open_in_full</span>
+            Push / Pull
+            <span class="dropdown-shortcut">P</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="toolbar-divider"></div>
+
       <!-- View dropdown -->
       <div class="menu-group">
         <button class="menu-btn" id="menu-btn-view">
