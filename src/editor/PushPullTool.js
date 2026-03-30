@@ -205,10 +205,76 @@ export class PushPullTool {
     // regardless of camera angle or face orientation.
     const pixelDelta = startMouseY - clientY; // positive = dragging up = extrude out
     const scale = this._dragScale();
-    const newDepth = Math.max(0, startDepth + pixelDelta * scale);
+    let newDepth = Math.max(0, startDepth + pixelDelta * scale);
+
+    if (this.sceneManager.snapEnabled) {
+      newDepth = this._snapDepth(mesh, materialIndex, newDepth);
+    }
 
     this._dragData.currentDepth = newDepth;
     this._applyExtrusion(mesh, faceNormal, materialIndex, newDepth);
+  }
+
+  /**
+   * Snap the target depth/dimension so the moving face lands on a grid boundary.
+   *
+   * For polygon/quad: depth == top-face Y above ground, so snap (pos.y + depth).
+   * For box: each face's world position = pos ± dim/2 (or pos + dim for +Y).
+   *   We snap the MOVING face's world coordinate, keeping the opposite face fixed.
+   */
+  _snapDepth(mesh, materialIndex, rawDim) {
+    const s = this.sceneManager.snapSize;
+    const ud = mesh.userData;
+
+    if (ud.type === 'box') {
+      return this._snapBoxFace(mesh, materialIndex, rawDim, s);
+    }
+
+    // polygon / quad: extrusion is straight up from mesh position
+    const topFaceY = mesh.position.y + rawDim;
+    return Math.max(0, Math.round(topFaceY / s) * s - mesh.position.y);
+  }
+
+  /**
+   * For a BoxGeometry face, compute the snapped dimension so the moving face
+   * aligns to the grid, while the opposite face stays fixed.
+   *
+   * Box is bottom-anchored (geometry translated by +height/2 in Y).
+   * materialIndex: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
+   */
+  _snapBoxFace(mesh, materialIndex, rawDim, s) {
+    const p = mesh.geometry.parameters;
+    const axes = [
+      { pos: 'x', cur: p.width,  sign: +1 },
+      { pos: 'x', cur: p.width,  sign: -1 },
+      { pos: 'y', cur: p.height, sign: +1 },
+      { pos: 'y', cur: p.height, sign: -1 },
+      { pos: 'z', cur: p.depth,  sign: +1 },
+      { pos: 'z', cur: p.depth,  sign: -1 },
+    ];
+    const { pos, cur, sign } = axes[materialIndex] ?? axes[4];
+
+    let snapped;
+
+    if (pos === 'y') {
+      if (sign === +1) {
+        // Top moves up; bottom is fixed at mesh.position.y (bottom-anchored geometry)
+        snapped = Math.round((mesh.position.y + rawDim) / s) * s - mesh.position.y;
+      } else {
+        // Bottom moves down; top is fixed at mesh.position.y + cur
+        const fixedTop = mesh.position.y + cur;
+        const movingBottom = fixedTop - rawDim;
+        snapped = fixedTop - Math.round(movingBottom / s) * s;
+      }
+    } else {
+      // X or Z: fixed face = pos ∓ (cur/2)*sign; moving face = fixed + rawDim*sign
+      const fixedFace = mesh.position[pos] - (cur / 2) * sign;
+      const movingFace = fixedFace + rawDim * sign;
+      const snappedFace = Math.round(movingFace / s) * s;
+      snapped = (snappedFace - fixedFace) * sign;
+    }
+
+    return Math.max(0.1, snapped);
   }
 
   /** World-units per screen pixel, based on camera distance to scene center. */

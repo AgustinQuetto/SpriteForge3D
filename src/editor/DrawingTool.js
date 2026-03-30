@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { findNearestVertex } from './CutUtils.js';
 
 /**
  * DrawingTool — Line and Rectangle drawing on the XZ ground plane (Y=0).
@@ -46,18 +47,43 @@ export class DrawingTool {
     this._setVisible(false);
   }
 
+  /** Grid snap — always on while drawing, regardless of snapEnabled toggle. */
+  _snapPos(worldPos) {
+    const s = this.sceneManager.snapSize;
+    return worldPos.clone().set(
+      Math.round(worldPos.x / s) * s,
+      worldPos.y,
+      Math.round(worldPos.z / s) * s
+    );
+  }
+
+  /** Returns snapped position with vertex snap taking priority over grid snap. */
+  _resolveSnap(worldPos) {
+    const gridSnapped = this._snapPos(worldPos);
+    const vertexSnap = findNearestVertex(
+      worldPos,
+      this.sceneManager.objects,
+      Math.max(this.sceneManager.snapSize * 0.6, 16)
+    );
+    // Color feedback: green = vertex snap, blue = grid snap
+    this._cursorIndicator.material.color.setHex(vertexSnap ? 0x4ae68a : 0x6382ff);
+    return vertexSnap ?? gridSnapped;
+  }
+
   /** Called on every canvas mousemove while a draw mode is active. */
   onMouseMove(worldPos) {
     if (!this.mode || !worldPos) return;
 
+    const pos = this._resolveSnap(worldPos);
+
     // Update cursor indicator
-    this._cursorIndicator.position.set(worldPos.x, worldPos.y, worldPos.z);
+    this._cursorIndicator.position.set(pos.x, pos.y, pos.z);
     this._cursorIndicator.visible = true;
 
     if (this.mode === 'line') {
-      this._updateLinePreview(worldPos);
+      this._updateLinePreview(pos);
     } else if (this.mode === 'rectangle') {
-      this._updateRectPreview(worldPos);
+      this._updateRectPreview(pos);
     }
   }
 
@@ -65,10 +91,12 @@ export class DrawingTool {
   onClick(worldPos) {
     if (!this.mode || !worldPos) return;
 
+    const pos = this._resolveSnap(worldPos);
+
     if (this.mode === 'line') {
-      this._handleLineClick(worldPos);
+      this._handleLineClick(pos);
     } else if (this.mode === 'rectangle') {
-      this._handleRectClick(worldPos);
+      this._handleRectClick(pos);
     }
   }
 

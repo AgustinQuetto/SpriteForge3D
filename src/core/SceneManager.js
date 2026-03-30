@@ -6,7 +6,8 @@ export class SceneManager {
   constructor(canvas) {
     this.canvas = canvas;
     this.objects = [];
-    this.selectedObjects = []; // Array of selected meshes
+    this.groups = [];          // THREE.Group containers in the scene
+    this.selectedObjects = []; // Array of selected meshes/groups
     this.gridVisible = true;
     this.snapEnabled = false;
     this.snapSize = 32.0;
@@ -87,11 +88,10 @@ export class SceneManager {
     this.transformControls.addEventListener('dragging-changed', (e) => {
       this.orbit.enabled = !e.value;
 
-      // When dragging STOPS, if we were using the temp group, 
-      // we need to make sure the objects keep their world positions.
-      if (!e.value && this.selectedObjects.length > 1) {
+      // When dragging STOPS, if we were using the temp group,
+      // unpack and re-pack so gizmo stays in place.
+      if (!e.value && this.tempSelectionGroup.children.length > 0) {
         this._unpackTempGroup();
-        // Re-attach to the group to keep the gizmo visible and ready for next drag
         this._packTempGroup();
       }
     });
@@ -284,7 +284,7 @@ export class SceneManager {
  
   _packTempGroup() {
     if (this.selectedObjects.length < 2) return;
- 
+
     // Center group position by averaging
     const center = new THREE.Vector3();
     this.selectedObjects.forEach(obj => {
@@ -293,21 +293,24 @@ export class SceneManager {
       center.add(worldPos);
     });
     center.divideScalar(this.selectedObjects.length);
- 
+
     this.tempSelectionGroup.position.copy(center);
     this.tempSelectionGroup.rotation.set(0, 0, 0);
     this.tempSelectionGroup.scale.set(1, 1, 1);
     this.tempSelectionGroup.updateMatrixWorld();
- 
+
     this.selectedObjects.forEach(obj => {
+      obj.userData._origParent = obj.parent; // remember where to return it
       this.tempSelectionGroup.attach(obj);
     });
   }
- 
+
   _unpackTempGroup() {
     const objs = [...this.tempSelectionGroup.children];
     objs.forEach(obj => {
-      this.exportGroup.attach(obj);
+      const dest = obj.userData._origParent || this.exportGroup;
+      dest.attach(obj);
+      delete obj.userData._origParent;
     });
   }
 
@@ -320,9 +323,72 @@ export class SceneManager {
     const intersects = this.raycaster.intersectObjects(customObjects || this.objects, false);
 
     if (intersects.length > 0) {
-      return intersects[0].object;
+      const hit = intersects[0].object;
+      // Bubble up to scene group if hit mesh belongs to one
+      if (!customObjects && hit.parent?.userData?.isSceneGroup) {
+        return hit.parent;
+      }
+      return hit;
     }
     return null;
+  }
+
+  // ──────────────────────────────────────────── Groups ──
+
+  createGroup(name, items) {
+    const group = new THREE.Group();
+    group.name = name || 'Group';
+    group.userData.isSceneGroup = true;
+
+    // Position at average world center of items
+    const center = new THREE.Vector3();
+    items.forEach(obj => {
+      const wp = new THREE.Vector3();
+      obj.getWorldPosition(wp);
+      center.add(wp);
+    });
+    center.divideScalar(items.length);
+    group.position.copy(center);
+
+    this.exportGroup.add(group);
+    this.groups.push(group);
+
+    items.forEach(obj => {
+      group.attach(obj); // preserves world transform
+    });
+
+    return group;
+  }
+
+  dissolveGroup(group) {
+    const children = [...group.children];
+    children.forEach(obj => {
+      this.exportGroup.attach(obj); // back to exportGroup, world transform preserved
+    });
+    this.exportGroup.remove(group);
+    const idx = this.groups.indexOf(group);
+    if (idx >= 0) this.groups.splice(idx, 1);
+    return children;
+  }
+
+  removeGroup(group) {
+    if (this.selectedObjects.includes(group)) {
+      this.deselectObject(group);
+    }
+    const children = [...group.children];
+    children.forEach(child => {
+      const idx = this.objects.indexOf(child);
+      if (idx >= 0) this.objects.splice(idx, 1);
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+        else child.material.dispose();
+      }
+    });
+    this.exportGroup.remove(group);
+    const idx = this.groups.indexOf(group);
+    if (idx >= 0) this.groups.splice(idx, 1);
+    this._updateObjectCount();
   }
 
   /**
@@ -361,11 +427,10 @@ export class SceneManager {
 
   clear() {
     this.deselectObject();
-    // Copy the array because removeObject modifies it
+    const grps = [...this.groups];
+    for (const g of grps) this.removeGroup(g);
     const objs = [...this.objects];
-    for (const obj of objs) {
-      this.removeObject(obj);
-    }
+    for (const obj of objs) this.removeObject(obj);
   }
 
   render() {

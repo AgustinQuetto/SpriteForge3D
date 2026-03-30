@@ -12,6 +12,7 @@ import { VertexEditor } from './editor/VertexEditor.js';
 import { UVExporter } from './export/UVExporter.js';
 import { DrawingTool } from './editor/DrawingTool.js';
 import { PushPullTool } from './editor/PushPullTool.js';
+import { CutTool } from './editor/CutTool.js';
 
 // ──────────────────────────────────────────────
 //  Initialize Systems
@@ -31,8 +32,9 @@ let isVertexEditMode = false;
 // Drawing & Push/Pull tools
 const drawingTool = new DrawingTool(scene);
 const pushPullTool = new PushPullTool(scene);
+const cutTool = new CutTool(scene);
 
-// Current tool mode: 'transform' | 'line' | 'rectangle' | 'push-pull'
+// Current tool mode: 'transform' | 'line' | 'rectangle' | 'push-pull' | 'cut'
 let toolMode = 'transform';
 
 function setToolMode(mode) {
@@ -41,33 +43,44 @@ function setToolMode(mode) {
   // Deactivate previous modes
   drawingTool.deactivate();
   pushPullTool.deactivate();
+  cutTool.deactivate();
 
   const viewport = document.getElementById('viewport');
   viewport.classList.remove('cursor-crosshair', 'cursor-push-pull');
 
   // Reset draw button active states
-  ['btn-tool-line', 'btn-tool-rectangle', 'btn-tool-push-pull'].forEach(id => {
+  ['btn-tool-line', 'btn-tool-rectangle', 'btn-tool-push-pull', 'btn-tool-cut'].forEach(id => {
     document.getElementById(id)?.classList.remove('active');
   });
 
   if (mode === 'line') {
+    scene.transformControls.detach();
     drawingTool.activate('line');
     viewport.classList.add('cursor-crosshair');
     document.getElementById('btn-tool-line')?.classList.add('active');
     showToast('Line Tool — click to place points, click start to close');
   } else if (mode === 'rectangle') {
+    scene.transformControls.detach();
     drawingTool.activate('rectangle');
     viewport.classList.add('cursor-crosshair');
     document.getElementById('btn-tool-rectangle')?.classList.add('active');
     showToast('Rectangle Tool — click two corners to create a face');
   } else if (mode === 'push-pull') {
+    scene.transformControls.detach();
     pushPullTool.activate();
     viewport.classList.add('cursor-push-pull');
     document.getElementById('btn-tool-push-pull')?.classList.add('active');
     scene.orbit.enabled = false;
     showToast('Push/Pull — hover a face and drag to extrude');
+  } else if (mode === 'cut') {
+    scene.transformControls.detach();
+    cutTool.activate();
+    viewport.classList.add('cursor-crosshair');
+    document.getElementById('btn-tool-cut')?.classList.add('active');
+    showToast('Cut Tool — click two points to slice meshes');
   } else {
-    // transform mode
+    // transform mode — re-attach gizmo to whatever is selected
+    scene._updateTransformControls();
     scene.orbit.enabled = true;
   }
 }
@@ -92,6 +105,45 @@ drawingTool.onFaceCreated = (mesh) => {
     },
   });
   showToast('Face created — use Push/Pull to extrude');
+};
+
+cutTool.onCutComplete = (results) => {
+  if (!results.length) {
+    showToast('Cut line did not intersect any mesh');
+    return;
+  }
+
+  const originals = results.map(r => r.original);
+  const pieces = results.flatMap(r => r.pieces);
+
+  originals.forEach(m => scene.removeObject(m));
+  scene.deselectObject();
+  pieces.forEach(m => {
+    scene.addObject(m);
+    scene.selectObject(m, true);
+  });
+  hierarchy.refresh();
+
+  history.push({
+    label: 'Cut',
+    undo: () => {
+      pieces.forEach(m => scene.removeObject(m));
+      scene.deselectObject();
+      originals.forEach(m => scene.addObject(m));
+      hierarchy.refresh();
+    },
+    redo: () => {
+      originals.forEach(m => scene.removeObject(m));
+      scene.deselectObject();
+      pieces.forEach(m => {
+        scene.addObject(m);
+        scene.selectObject(m, true);
+      });
+      hierarchy.refresh();
+    },
+  });
+
+  showToast(`Cut into ${pieces.length} piece${pieces.length !== 1 ? 's' : ''}`);
 };
 
 // ──────────────────────────────────────────────
@@ -191,6 +243,8 @@ canvas.addEventListener('mousemove', (e) => {
   if (toolMode === 'line' || toolMode === 'rectangle') {
     const worldPos = scene.getWorldPositionFromScreen(e.clientX, e.clientY);
     if (worldPos) drawingTool.onMouseMove(worldPos);
+  } else if (toolMode === 'cut') {
+    cutTool.onMouseMove(e.clientX, e.clientY);
   } else if (toolMode === 'push-pull') {
     pushPullTool.onMouseMove(e.clientX, e.clientY);
     // Update cursor based on whether a face is hovered
@@ -232,6 +286,11 @@ canvas.addEventListener('click', (e) => {
 
   if (toolMode === 'push-pull') return; // handled by mousedown/up
 
+  if (toolMode === 'cut') {
+    cutTool.onClick(e.clientX, e.clientY);
+    return;
+  }
+
   if (isVertexEditMode) {
     const picked = scene.pickObject(e.clientX, e.clientY, vertexEditor.controlPoints);
     if (picked) {
@@ -245,7 +304,7 @@ canvas.addEventListener('click', (e) => {
   const picked = scene.pickObject(e.clientX, e.clientY);
 
   if (picked) {
-    const additive = e.ctrlKey || e.metaKey;
+    const additive = e.shiftKey;
     scene.selectObject(picked, additive);
   } else {
     const selectedAssets = assetPanel.selectedAssets;
@@ -515,39 +574,86 @@ function duplicateSelected() {
 function deleteSelected() {
   const selection = [...scene.selectedObjects];
   if (selection.length === 0) return;
- 
+
   const count = selection.length;
-  // Store data for undo
-  const records = selection.map(obj => ({
-    obj,
-    name: obj.name,
-    parent: obj.parent,
-    pos: obj.position.clone(),
-    rot: obj.rotation.clone(),
-    scl: obj.scale.clone()
-  }));
- 
-  selection.forEach(obj => scene.removeObject(obj));
+
+  selection.forEach(item => {
+    if (item.userData.isSceneGroup) {
+      scene.removeGroup(item);
+    } else {
+      scene.removeObject(item);
+    }
+  });
   hierarchy.refresh();
- 
+
   history.push({
-    label: `Delete ${count} objects`,
-    undo: () => {
-      records.forEach(r => {
-        r.obj.position.copy(r.pos);
-        r.obj.rotation.copy(r.rot);
-        r.obj.scale.copy(r.scl);
-        scene.addObject(r.obj);
-      });
-      hierarchy.refresh();
-    },
+    label: `Delete ${count} object(s)`,
+    undo: () => showToast('Undo delete not fully supported for groups yet'),
     redo: () => {
-      records.forEach(r => scene.removeObject(r.obj));
+      selection.forEach(item => {
+        if (item.userData.isSceneGroup) scene.removeGroup(item);
+        else scene.removeObject(item);
+      });
       hierarchy.refresh();
     }
   });
- 
+
   showToast(`Deleted ${count} object(s)`);
+}
+
+function groupSelected() {
+  const selection = [...scene.selectedObjects];
+  if (selection.length < 2) {
+    showToast('Select 2 or more objects to group');
+    return;
+  }
+
+  const group = scene.createGroup('Group', selection);
+  scene.deselectObject();
+  scene.selectObject(group, false);
+  hierarchy.refresh();
+
+  history.push({
+    label: 'Group',
+    undo: () => {
+      const children = scene.dissolveGroup(group);
+      scene.deselectObject();
+      children.forEach(c => scene.selectObject(c, true));
+      hierarchy.refresh();
+    },
+    redo: () => {
+      scene.createGroup('Group', children => children); // approximate
+      hierarchy.refresh();
+    }
+  });
+
+  showToast(`Grouped ${selection.length} objects`);
+}
+
+function ungroupSelected() {
+  const groups = scene.selectedObjects.filter(o => o.userData.isSceneGroup);
+  if (groups.length === 0) {
+    showToast('Select a group to ungroup');
+    return;
+  }
+
+  groups.forEach(group => {
+    const children = scene.dissolveGroup(group);
+    scene.deselectObject(group);
+    children.forEach(c => scene.selectObject(c, true));
+  });
+  hierarchy.refresh();
+
+  history.push({
+    label: 'Ungroup',
+    undo: () => showToast('Undo ungroup not fully supported yet'),
+    redo: () => {
+      groups.forEach(group => scene.dissolveGroup(group));
+      hierarchy.refresh();
+    }
+  });
+
+  showToast('Ungrouped');
 }
 
 // ──────────────────────────────────────────────
@@ -685,12 +791,6 @@ window.addEventListener('keydown', (e) => {
     case 'w': setTransformBtn('translate'); break;
     case 'e': setTransformBtn('rotate'); break;
     case 'r': setTransformBtn('scale'); break;
-    case 'g':
-      snapOn = !snapOn;
-      scene.setSnap(snapOn);
-      document.getElementById('btn-snap').classList.toggle('active', snapOn);
-      showToast(snapOn ? 'Snap ON' : 'Snap OFF');
-      break;
     case 'delete':
     case 'backspace':
       deleteSelected();
@@ -700,6 +800,19 @@ window.addEventListener('keydown', (e) => {
         e.preventDefault();
         duplicateSelected();
       }
+      break;
+    case 'g':
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        if (e.shiftKey) ungroupSelected();
+        else groupSelected();
+        break;
+      }
+      // plain G → snap toggle (handled below, don't break)
+      snapOn = !snapOn;
+      scene.setSnap(snapOn);
+      document.getElementById('btn-snap').classList.toggle('active', snapOn);
+      showToast(snapOn ? 'Snap ON' : 'Snap OFF');
       break;
     case 'z':
       if (e.ctrlKey || e.metaKey) {
@@ -721,6 +834,9 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'p':
       setToolMode('push-pull');
+      break;
+    case 'c':
+      setToolMode('cut');
       break;
     case 'escape':
       if (toolMode !== 'transform') {
@@ -1002,27 +1118,36 @@ function getRecommendedUVResolution(mesh) {
  
 canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
-  
+
   const picked = scene.pickObject(e.clientX, e.clientY);
   if (!picked) {
     contextMenu.style.display = 'none';
     return;
   }
- 
+
   contextTarget = picked;
-  scene.selectObject(picked, false); // select it
- 
+  // Add to selection additively if not already selected, else keep current selection
+  if (!scene.selectedObjects.includes(picked)) {
+    scene.selectObject(picked, false);
+  }
+
+  // Show/hide group-specific items
+  const sel = scene.selectedObjects;
+  const hasGroup = sel.some(o => o.userData.isSceneGroup);
+  const canGroup = sel.length >= 2 && !hasGroup;
+  document.getElementById('menu-group').style.display = canGroup ? '' : 'none';
+  document.getElementById('menu-ungroup').style.display = hasGroup ? '' : 'none';
+
   contextMenu.style.display = 'block';
-  
-  // Ensure menu stays within screen bounds
-  const menuWidth = 180; 
-  const menuHeight = 200;
+
+  const menuWidth = 180;
+  const menuHeight = 240;
   let left = e.clientX;
   let top = e.clientY;
- 
+
   if (left + menuWidth > window.innerWidth) left -= menuWidth;
   if (top + menuHeight > window.innerHeight) top -= menuHeight;
- 
+
   contextMenu.style.left = `${left}px`;
   contextMenu.style.top = `${top}px`;
 });
@@ -1038,9 +1163,19 @@ document.getElementById('menu-duplicate').addEventListener('click', () => {
   duplicateSelected();
   contextMenu.style.display = 'none';
 });
- 
+
 document.getElementById('menu-delete').addEventListener('click', () => {
   deleteSelected();
+  contextMenu.style.display = 'none';
+});
+
+document.getElementById('menu-group').addEventListener('click', () => {
+  groupSelected();
+  contextMenu.style.display = 'none';
+});
+
+document.getElementById('menu-ungroup').addEventListener('click', () => {
+  ungroupSelected();
   contextMenu.style.display = 'none';
 });
  
