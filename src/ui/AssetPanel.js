@@ -20,8 +20,10 @@ export class AssetPanel {
     this.btnSlice = document.getElementById('btn-slice-asset');
     this.inputSliceW = document.getElementById('slicer-w');
     this.inputSliceH = document.getElementById('slicer-h');
+    this._pasteCounter = 0;
 
     this._initDragDrop();
+    this._initPaste();
     this._initSlicer();
   }
 
@@ -61,9 +63,54 @@ export class AssetPanel {
     });
   }
 
-  _handleFiles(files) {
-    for (const file of files) {
-      if (file.type !== 'image/png') continue;
+  _initPaste() {
+    document.addEventListener('paste', async (e) => {
+      const target = e.target;
+      if (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      const imageFiles = [];
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) imageFiles.push(file);
+        }
+      }
+
+      if (imageFiles.length === 0) return;
+
+      e.preventDefault();
+      const imported = await this._importFiles(imageFiles, { autoSelect: true });
+      if (imported.length === 0) return;
+
+      const label = imported.length === 1
+        ? `Pasted "${imported[0].name}"`
+        : `Pasted ${imported.length} images`;
+      if (window.showToast) window.showToast(label);
+    });
+  }
+
+  _nameFromFile(file) {
+    const base = file.name?.replace(/\.[^.]+$/, '') || '';
+    if (base && base !== 'image' && !/^blob$/i.test(base)) return base;
+    this._pasteCounter += 1;
+    return `pasted-${this._pasteCounter}`;
+  }
+
+  _importImageFile(file, nameOverride = null) {
+    return new Promise((resolve) => {
+      if (!file.type.startsWith('image/')) {
+        resolve(null);
+        return;
+      }
 
       const reader = new FileReader();
       reader.onload = (e) => {
@@ -76,14 +123,66 @@ export class AssetPanel {
           texture.magFilter = THREE.NearestFilter;
           texture.minFilter = THREE.NearestMipMapLinearFilter;
 
-          const name = file.name.replace('.png', '');
+          const name = nameOverride || this._nameFromFile(file);
           const asset = { name, texture, image: img, dataUrl };
           this.assets.push(asset);
           this._addThumbnail(asset);
+          resolve(asset);
         };
+        img.onerror = () => resolve(null);
         img.src = dataUrl;
       };
+      reader.onerror = () => resolve(null);
       reader.readAsDataURL(file);
+    });
+  }
+
+  async _importFiles(files, { pngOnly = false, autoSelect = false } = {}) {
+    const filtered = pngOnly
+      ? [...files].filter(f => f.type === 'image/png')
+      : [...files].filter(f => f.type.startsWith('image/'));
+
+    const imported = [];
+    for (const file of filtered) {
+      const asset = await this._importImageFile(file);
+      if (asset) imported.push(asset);
+    }
+
+    if (autoSelect && imported.length > 0) {
+      this._selectAssets(imported);
+    }
+
+    return imported;
+  }
+
+  _handleFiles(files) {
+    this._importFiles(files, { pngOnly: true });
+  }
+
+  _selectAssets(assets) {
+    this.assetGrid.querySelectorAll('.asset-thumb').forEach(t =>
+      t.classList.remove('selected')
+    );
+    this.selectedAssets = [...assets];
+    this.selectedAsset = assets[assets.length - 1] || null;
+
+    for (const thumb of this.assetGrid.children) {
+      if (assets.includes(thumb._asset)) {
+        thumb.classList.add('selected');
+      }
+    }
+
+    if (this.slicerControls) {
+      if (this.selectedAsset) {
+        this.slicerControls.style.display = 'block';
+        this.slicerTargetName.textContent = this.selectedAsset.name;
+      } else {
+        this.slicerControls.style.display = 'none';
+      }
+    }
+
+    if (this.onAssetSelected && this.selectedAsset) {
+      this.onAssetSelected(this.selectedAsset);
     }
   }
 
@@ -92,6 +191,7 @@ export class AssetPanel {
     thumb.classList.add('asset-thumb');
     thumb.title = asset.name;
     thumb.draggable = true;
+    thumb._asset = asset;
 
     const img = document.createElement('img');
     img.src = asset.dataUrl;

@@ -1159,6 +1159,8 @@ function showToast(message) {
   toastTimeout = setTimeout(() => { toast.remove(); }, 2500);
 }
 
+window.showToast = showToast;
+
 // ──────────────────────────────────────────────
 //  Project Save / Load
 // ──────────────────────────────────────────────
@@ -1536,7 +1538,7 @@ function animate() {
 animate();
 
 // Initial UI state
-showToast('Sprite3D ready — drop PNG files to begin');
+showToast('Sprite3D ready — drop or paste PNG files to begin');
 
 // ── Dropdown Menu System ──────────────────────────────────────────────────────
 const menuGroups = document.querySelectorAll('.menu-group');
