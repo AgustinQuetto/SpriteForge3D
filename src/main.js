@@ -14,7 +14,7 @@ import { DrawingTool } from './editor/DrawingTool.js';
 import { PushPullTool } from './editor/PushPullTool.js';
 import { CutTool } from './editor/CutTool.js';
 import { VoxelReliefTool } from './editor/VoxelReliefTool.js';
-import { cloneVoxelState, restoreVoxelState, countMask } from './editor/PixelUtils.js';
+import { cloneVoxelState, restoreVoxelState, countMask, loadImageFromFile } from './editor/PixelUtils.js';
 
 // ──────────────────────────────────────────────
 //  Initialize Systems
@@ -282,6 +282,154 @@ propsPanel.onReliefSelectionModeChanged = (mode) => {
   if (toolMode === 'voxel-relief') {
     showToast(`Modo selección: ${reliefModeLabel(mode)}`);
   }
+};
+
+function captureVoxelHeightSnapshot(mesh) {
+  return {
+    ...cloneVoxelState(mesh),
+    source: mesh.userData.voxelHeightmapSource ?? null,
+    name: mesh.userData.voxelHeightmapName ?? null,
+    image: mesh.userData.voxelHeightmapImage ?? null,
+    max: mesh.userData.voxelHeightMax ?? 8,
+    invert: !!mesh.userData.voxelHeightInvert,
+  };
+}
+
+function restoreVoxelHeightSnapshot(mesh, snap) {
+  restoreVoxelState(mesh, snap);
+  mesh.userData.voxelHeightmapSource = snap.source;
+  mesh.userData.voxelHeightmapName = snap.name;
+  mesh.userData.voxelHeightmapImage = snap.image;
+  mesh.userData.voxelHeightMax = snap.max;
+  mesh.userData.voxelHeightInvert = snap.invert;
+  if (mesh.userData.voxelized) QuadFactory.rebuildVoxelGeometry(mesh);
+  voxelReliefTool.updateSelectionOverlay(mesh);
+  propsPanel.showProperties(mesh);
+}
+
+function reapplyVoxelHeight(mesh, params) {
+  if (params.type === 'luminance') {
+    QuadFactory.applyHeightmapFromLuminance(mesh, {
+      maxDepth: params.maxDepth,
+      invert: params.invert,
+    });
+  } else if (params.type === 'file' && params.image) {
+    QuadFactory.applyHeightmap(mesh, params.image, {
+      maxDepth: params.maxDepth,
+      invert: params.invert,
+      sourceName: params.sourceName,
+    });
+  } else if (params.type === 'clear') {
+    QuadFactory.clearVoxelDepth(mesh);
+  }
+  voxelReliefTool.updateSelectionOverlay(mesh);
+  propsPanel.showProperties(mesh);
+}
+
+function pushVoxelHeightHistory(mesh, label, snap, params) {
+  history.push({
+    label,
+    undo: () => restoreVoxelHeightSnapshot(mesh, snap),
+    redo: () => reapplyVoxelHeight(mesh, params),
+  });
+}
+
+propsPanel.onReliefApplyLuminance = (mesh) => {
+  if (!mesh.userData.voxelized) {
+    showToast('Voxeliza el sprite primero');
+    return;
+  }
+  const maxDepth = mesh.userData.voxelHeightMax ?? 8;
+  const invert = !!mesh.userData.voxelHeightInvert;
+  const snap = captureVoxelHeightSnapshot(mesh);
+  const params = { type: 'luminance', maxDepth, invert };
+
+  QuadFactory.applyHeightmapFromLuminance(mesh, params);
+  voxelReliefTool.updateSelectionOverlay(mesh);
+  pushVoxelHeightHistory(mesh, 'Heightmap Luminance', snap, params);
+  propsPanel.showProperties(mesh);
+  showToast('Volumen aplicado desde luminancia del sprite');
+};
+
+propsPanel.onReliefLoadHeightmap = (mesh) => {
+  if (!mesh.userData.voxelized) {
+    showToast('Voxeliza el sprite primero');
+    return;
+  }
+
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/png,image/jpeg,image/webp';
+  input.onchange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const img = await loadImageFromFile(file);
+      const maxDepth = mesh.userData.voxelHeightMax ?? 8;
+      const invert = !!mesh.userData.voxelHeightInvert;
+      const snap = captureVoxelHeightSnapshot(mesh);
+      const params = {
+        type: 'file',
+        maxDepth,
+        invert,
+        image: img,
+        sourceName: file.name,
+      };
+
+      QuadFactory.applyHeightmap(mesh, img, {
+        maxDepth,
+        invert,
+        sourceName: file.name,
+      });
+      voxelReliefTool.updateSelectionOverlay(mesh);
+      pushVoxelHeightHistory(mesh, 'Load Heightmap', snap, params);
+      propsPanel.showProperties(mesh);
+      showToast(`Heightmap "${file.name}" aplicado`);
+    } catch (err) {
+      showToast(`Error al cargar heightmap: ${err.message}`);
+    }
+  };
+  input.click();
+};
+
+propsPanel.onReliefClearHeightmap = (mesh) => {
+  if (!mesh.userData.voxelized) return;
+  const snap = captureVoxelHeightSnapshot(mesh);
+  const params = { type: 'clear' };
+  QuadFactory.clearVoxelDepth(mesh);
+  voxelReliefTool.updateSelectionOverlay(mesh);
+  pushVoxelHeightHistory(mesh, 'Clear Heightmap', snap, params);
+  propsPanel.showProperties(mesh);
+  showToast('Volumen eliminado');
+};
+
+propsPanel.onReliefHeightSettingsChanged = (mesh, { maxDepth, invert }, { recordHistory = false } = {}) => {
+  if (!mesh.userData.voxelized) return;
+  if (!mesh.userData.voxelHeightmapSource && !mesh.userData.voxelHeightmapImage) return;
+
+  if (recordHistory) {
+    const snap = captureVoxelHeightSnapshot(mesh);
+    const params = mesh.userData.voxelHeightmapSource === 'luminance'
+      ? { type: 'luminance', maxDepth, invert }
+      : {
+          type: 'file',
+          maxDepth,
+          invert,
+          image: mesh.userData.voxelHeightmapImage,
+          sourceName: mesh.userData.voxelHeightmapName,
+        };
+    mesh.userData.voxelHeightMax = maxDepth;
+    mesh.userData.voxelHeightInvert = invert;
+    QuadFactory.reapplyHeightmap(mesh);
+    voxelReliefTool.updateSelectionOverlay(mesh);
+    pushVoxelHeightHistory(mesh, 'Heightmap Settings', snap, params);
+    return;
+  }
+
+  mesh.userData.voxelHeightMax = maxDepth;
+  mesh.userData.voxelHeightInvert = invert;
+  QuadFactory.reapplyHeightmap(mesh);
+  voxelReliefTool.updateSelectionOverlay(mesh);
 };
 
 // Apply texture from properties panel

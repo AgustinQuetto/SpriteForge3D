@@ -213,3 +213,87 @@ export function restoreVoxelState(mesh, state) {
   if (state.depthMap) mesh.userData.voxelDepthMap = new Uint16Array(state.depthMap);
   if (state.selection) mesh.userData.voxelSelection = new Uint8Array(state.selection);
 }
+
+/**
+ * Perceived luminance from RGBA pixel (0–255).
+ */
+export function grayscaleFromRGBA(data, byteIndex) {
+  const r = data[byteIndex];
+  const g = data[byteIndex + 1];
+  const b = data[byteIndex + 2];
+  return Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+}
+
+/**
+ * Read RGBA from any HTMLImageElement / canvas source.
+ */
+export function getImageDataFromSource(img) {
+  const width = img.naturalWidth || img.width;
+  const height = img.naturalHeight || img.height;
+  if (!width || !height) return null;
+
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, width, height);
+  const { data } = ctx.getImageData(0, 0, width, height);
+  return { data, width, height };
+}
+
+/**
+ * Sample grayscale from a heightmap at sprite pixel coordinates.
+ */
+export function sampleHeightmapGrayscale(heightData, heightW, heightH, col, row, spriteW, spriteH) {
+  const u = (col + 0.5) / spriteW;
+  const v = (row + 0.5) / spriteH;
+  const hc = Math.min(heightW - 1, Math.max(0, Math.floor(u * heightW)));
+  const hr = Math.min(heightH - 1, Math.max(0, Math.floor(v * heightH)));
+  return grayscaleFromRGBA(heightData, (hr * heightW + hc) * 4);
+}
+
+/**
+ * Build depth map from sprite alpha mask + grayscale height source.
+ * @param {object} opts
+ * @param {number} opts.maxDepth — white (255) maps to this many extra layers
+ * @param {boolean} opts.invert
+ * @param {boolean} opts.onlyOpaque — skip transparent sprite pixels
+ */
+export function buildDepthMapFromHeightSource(
+  spriteData, spriteW, spriteH,
+  heightData, heightW, heightH,
+  opts = {}
+) {
+  const maxDepth = Math.max(0, opts.maxDepth ?? 8);
+  const invert = !!opts.invert;
+  const onlyOpaque = opts.onlyOpaque !== false;
+  const depthMap = new Uint16Array(spriteW * spriteH);
+
+  for (let row = 0; row < spriteH; row++) {
+    for (let col = 0; col < spriteW; col++) {
+      const pi = pixelIndex(col, row, spriteW);
+      const si = pi * 4;
+      if (onlyOpaque && spriteData[si + 3] < ALPHA_THRESHOLD) continue;
+
+      let gray = sampleHeightmapGrayscale(heightData, heightW, heightH, col, row, spriteW, spriteH);
+      if (invert) gray = 255 - gray;
+
+      depthMap[pi] = Math.round((gray / 255) * maxDepth);
+    }
+  }
+
+  return depthMap;
+}
+
+/** Load an image file as HTMLImageElement. */
+export function loadImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Failed to decode image'));
+      img.src = ev.target.result;
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}

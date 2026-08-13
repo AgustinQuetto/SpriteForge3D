@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ALPHA_THRESHOLD, getImageDataFromMesh } from './PixelUtils.js';
+import { ALPHA_THRESHOLD, buildDepthMapFromHeightSource, getImageDataFromMesh, getImageDataFromSource } from './PixelUtils.js';
 
 /**
  * QuadFactory — Creates textured planes and boxes from sprite textures.
@@ -598,6 +598,103 @@ export class QuadFactory {
   }
 
   /**
+   * Apply grayscale heightmap to voxel depth (per-pixel volume).
+   * @param {THREE.Mesh} mesh — voxelized sprite
+   * @param {HTMLImageElement} heightImage
+   * @param {{ maxDepth?: number, invert?: boolean, sourceName?: string }} opts
+   * @returns {THREE.Mesh}
+   */
+  static applyHeightmap(mesh, heightImage, opts = {}) {
+    if (!mesh.userData.voxelized) {
+      console.warn('applyHeightmap: mesh is not voxelized');
+      return mesh;
+    }
+
+    const spriteData = getImageDataFromMesh(mesh);
+    const heightData = getImageDataFromSource(heightImage);
+    if (!spriteData || !heightData) return mesh;
+
+    const maxDepth = opts.maxDepth ?? mesh.userData.voxelHeightMax ?? 8;
+    const invert = opts.invert ?? !!mesh.userData.voxelHeightInvert;
+
+    mesh.userData.voxelDepthMap = buildDepthMapFromHeightSource(
+      spriteData.data, spriteData.width, spriteData.height,
+      heightData.data, heightData.width, heightData.height,
+      { maxDepth, invert }
+    );
+    mesh.userData.voxelHeightMax = maxDepth;
+    mesh.userData.voxelHeightInvert = invert;
+    mesh.userData.voxelHeightmapSource = 'file';
+    mesh.userData.voxelHeightmapName = opts.sourceName || 'heightmap.png';
+    mesh.userData.voxelHeightmapImage = heightImage;
+
+    return QuadFactory.rebuildVoxelGeometry(mesh);
+  }
+
+  /**
+   * Derive depth from the sprite texture luminance (same image, grayscale volume).
+   * @param {THREE.Mesh} mesh
+   * @param {{ maxDepth?: number, invert?: boolean }} opts
+   * @returns {THREE.Mesh}
+   */
+  static applyHeightmapFromLuminance(mesh, opts = {}) {
+    if (!mesh.userData.voxelized) {
+      console.warn('applyHeightmapFromLuminance: mesh is not voxelized');
+      return mesh;
+    }
+
+    const spriteData = getImageDataFromMesh(mesh);
+    if (!spriteData) return mesh;
+
+    const maxDepth = opts.maxDepth ?? mesh.userData.voxelHeightMax ?? 8;
+    const invert = opts.invert ?? !!mesh.userData.voxelHeightInvert;
+
+    mesh.userData.voxelDepthMap = buildDepthMapFromHeightSource(
+      spriteData.data, spriteData.width, spriteData.height,
+      spriteData.data, spriteData.width, spriteData.height,
+      { maxDepth, invert }
+    );
+    mesh.userData.voxelHeightMax = maxDepth;
+    mesh.userData.voxelHeightInvert = invert;
+    mesh.userData.voxelHeightmapSource = 'luminance';
+    mesh.userData.voxelHeightmapName = mesh.userData.textureName || 'sprite luminance';
+    mesh.userData.voxelHeightmapImage = null;
+
+    return QuadFactory.rebuildVoxelGeometry(mesh);
+  }
+
+  /**
+   * Re-apply stored heightmap with updated max depth / invert settings.
+   */
+  static reapplyHeightmap(mesh) {
+    if (mesh.userData.voxelHeightmapSource === 'luminance') {
+      return QuadFactory.applyHeightmapFromLuminance(mesh, {
+        maxDepth: mesh.userData.voxelHeightMax,
+        invert: mesh.userData.voxelHeightInvert,
+      });
+    }
+    if (mesh.userData.voxelHeightmapImage) {
+      return QuadFactory.applyHeightmap(mesh, mesh.userData.voxelHeightmapImage, {
+        maxDepth: mesh.userData.voxelHeightMax,
+        invert: mesh.userData.voxelHeightInvert,
+        sourceName: mesh.userData.voxelHeightmapName,
+      });
+    }
+    return mesh;
+  }
+
+  /** Reset all voxel depth layers to flat. */
+  static clearVoxelDepth(mesh) {
+    if (!mesh.userData.voxelDepthMap) return mesh;
+    mesh.userData.voxelDepthMap.fill(0);
+    mesh.userData.voxelHeightmapSource = null;
+    mesh.userData.voxelHeightmapName = null;
+    mesh.userData.voxelHeightmapImage = null;
+    if (mesh.userData.voxelized) QuadFactory.rebuildVoxelGeometry(mesh);
+    return mesh;
+  }
+
+  /**
    * Revert a voxelized mesh back to its original flat quad representation.
    * @param {THREE.Mesh} mesh
    * @returns {THREE.Mesh}
@@ -648,6 +745,11 @@ export class QuadFactory {
     mesh.userData.voxelized = false;
     mesh.userData.type = 'quad';
     mesh.userData.extrusionDepth = 0;
+    mesh.userData.voxelDepthMap = null;
+    mesh.userData.voxelSelection = null;
+    mesh.userData.voxelHeightmapSource = null;
+    mesh.userData.voxelHeightmapName = null;
+    mesh.userData.voxelHeightmapImage = null;
 
     return mesh;
   }

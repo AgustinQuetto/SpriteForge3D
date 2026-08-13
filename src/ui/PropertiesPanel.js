@@ -20,6 +20,10 @@ export class PropertiesPanel {
     this.onReliefDepthStepChanged = null;
     this.onReliefActivateTool = null;
     this.onReliefSelectionModeChanged = null;
+    this.onReliefLoadHeightmap = null;
+    this.onReliefApplyLuminance = null;
+    this.onReliefClearHeightmap = null;
+    this.onReliefHeightSettingsChanged = null;
     this.reliefSelectionMode = 'wand';
 
     this.showEmpty();
@@ -47,6 +51,11 @@ export class PropertiesPanel {
     const selectedPixels = mesh.userData.voxelSelection
       ? mesh.userData.voxelSelection.reduce((n, v) => n + (v ? 1 : 0), 0)
       : 0;
+    const heightMax = mesh.userData.voxelHeightMax ?? 8;
+    const heightInvert = !!mesh.userData.voxelHeightInvert;
+    const heightmapLabel = mesh.userData.voxelHeightmapName
+      ? mesh.userData.voxelHeightmapName
+      : 'None';
 
     this.body.innerHTML = `
       <div class="prop-section">
@@ -182,6 +191,37 @@ export class PropertiesPanel {
         <button class="prop-btn" id="btn-relief-clear">
           <span class="material-symbols-rounded">deselect</span>
           Clear Selection
+        </button>
+        <div class="dropdown-divider" style="margin:12px 0;opacity:0.35"></div>
+        <div class="prop-section-title" style="margin-bottom:6px">Heightmap (Mapa de grises)</div>
+        <div style="margin-bottom:8px;font-size:12px;color:var(--text-secondary);word-break:break-all">
+          ${heightmapLabel}
+        </div>
+        <div class="prop-slider-row">
+          <span class="prop-slider-label">Max height</span>
+          <input type="range" class="prop-slider" id="prop-height-max" min="0" max="32" step="1" value="${heightMax}">
+          <input type="number" class="prop-input" id="prop-height-max-num" min="0" max="64" step="1" value="${heightMax}" style="width:60px;margin-left:8px">
+        </div>
+        <div class="prop-row" style="margin-top:8px;margin-bottom:8px">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text-secondary)">
+            <input type="checkbox" id="prop-height-invert" ${heightInvert ? 'checked' : ''}>
+            Invert (negro = alto)
+          </label>
+        </div>
+        <small style="color:var(--text-muted);display:block;margin-bottom:8px">
+          Blanco = máximo volumen. Solo afecta píxeles opacos del sprite.
+        </small>
+        <button class="prop-btn" id="btn-height-luminance" style="margin-bottom:6px">
+          <span class="material-symbols-rounded">gradient</span>
+          Apply from sprite luminance
+        </button>
+        <button class="prop-btn" id="btn-height-load" style="margin-bottom:6px">
+          <span class="material-symbols-rounded">upload</span>
+          Load grayscale PNG…
+        </button>
+        <button class="prop-btn" id="btn-height-clear">
+          <span class="material-symbols-rounded">layers_clear</span>
+          Clear volume / heightmap
         </button>
       </div>
       ` : ''}
@@ -422,6 +462,48 @@ export class PropertiesPanel {
     });
     this._on('btn-relief-clear', 'click', () => {
       if (this.onReliefClearSelection) this.onReliefClearSelection(mesh);
+    });
+
+    this._bindHeightmapControls(mesh);
+  }
+
+  _bindHeightmapControls(mesh) {
+    const maxSlider = document.getElementById('prop-height-max');
+    const maxNum = document.getElementById('prop-height-max-num');
+    const invertCheckbox = document.getElementById('prop-height-invert');
+
+    const syncHeightSettings = (reapply, recordHistory = false) => {
+      const maxDepth = Math.max(0, Math.min(64, parseInt(maxNum?.value ?? 8, 10) || 0));
+      const invert = invertCheckbox?.checked ?? false;
+      if (maxSlider) maxSlider.value = Math.min(32, maxDepth);
+      if (maxNum) maxNum.value = maxDepth;
+      if (reapply && this.onReliefHeightSettingsChanged) {
+        this.onReliefHeightSettingsChanged(mesh, { maxDepth, invert }, { recordHistory });
+      }
+    };
+
+    if (maxSlider) {
+      maxSlider.addEventListener('input', (e) => {
+        if (maxNum) maxNum.value = e.target.value;
+        syncHeightSettings(true, false);
+      });
+      maxSlider.addEventListener('change', () => syncHeightSettings(true, true));
+    }
+    if (maxNum) {
+      maxNum.addEventListener('change', () => syncHeightSettings(true, true));
+    }
+    if (invertCheckbox) {
+      invertCheckbox.addEventListener('change', () => syncHeightSettings(true, true));
+    }
+
+    this._on('btn-height-luminance', 'click', () => {
+      if (this.onReliefApplyLuminance) this.onReliefApplyLuminance(mesh);
+    });
+    this._on('btn-height-load', 'click', () => {
+      if (this.onReliefLoadHeightmap) this.onReliefLoadHeightmap(mesh);
+    });
+    this._on('btn-height-clear', 'click', () => {
+      if (this.onReliefClearHeightmap) this.onReliefClearHeightmap(mesh);
     });
   }
 
