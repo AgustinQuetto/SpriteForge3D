@@ -100,9 +100,13 @@ export class SceneManager {
       if (this.snapEnabled && this.transformControls.mode === 'translate') {
         const obj = this.transformControls.object;
         if (obj) {
-          obj.position.x = Math.round(obj.position.x / this.snapSize) * this.snapSize;
-          obj.position.y = Math.round(obj.position.y / this.snapSize) * this.snapSize;
-          obj.position.z = Math.round(obj.position.z / this.snapSize) * this.snapSize;
+          if (obj === this.tempSelectionGroup) {
+            obj.position.x = Math.round(obj.position.x / this.snapSize) * this.snapSize;
+            obj.position.y = Math.round(obj.position.y / this.snapSize) * this.snapSize;
+            obj.position.z = Math.round(obj.position.z / this.snapSize) * this.snapSize;
+          } else {
+            this.snapObjectToGrid(obj);
+          }
         }
       }
       
@@ -116,6 +120,67 @@ export class SceneManager {
         this.onObjectChanged();
       }
     });
+  }
+
+  /**
+   * Snap an object's position so its bounding dimensions fit exactly inside grid cells.
+   * - Objects with odd cell width (e.g. 1 cell wide = 32px) align to cell centers.
+   * - Objects with even cell width (e.g. 2 cells wide = 64px) align to grid lines.
+   * - Takes into account rotation around Y axis.
+   */
+  snapObjectToGrid(mesh, customSnapSize = null) {
+    if (!mesh) return;
+    const snapSize = customSnapSize || this.snapSize;
+    if (!snapSize) return;
+
+    let width = mesh.userData.originalWidth;
+    let depth = mesh.userData.extrusionDepth || 0;
+
+    if (width === undefined && mesh.geometry) {
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      const box = mesh.geometry.boundingBox;
+      width = (box.max.x - box.min.x) * mesh.scale.x;
+      depth = (box.max.z - box.min.z) * mesh.scale.z;
+    } else {
+      width = (width || 32) * mesh.scale.x;
+      depth = depth * mesh.scale.z;
+    }
+
+    const sin = Math.abs(Math.sin(mesh.rotation.y));
+    const cos = Math.abs(Math.cos(mesh.rotation.y));
+
+    let effWidthX = width;
+    let effDepthZ = depth;
+
+    if (sin > cos) {
+      effWidthX = depth;
+      effDepthZ = width;
+    }
+
+    const pos = mesh.position;
+
+    // X Alignment
+    const numCellsX = Math.max(1, Math.round(effWidthX / snapSize));
+    if (numCellsX % 2 === 1) {
+      pos.x = (Math.floor(pos.x / snapSize) + 0.5) * snapSize;
+    } else {
+      pos.x = Math.round(pos.x / snapSize) * snapSize;
+    }
+
+    // Y Alignment
+    pos.y = Math.round(pos.y / snapSize) * snapSize;
+
+    // Z Alignment
+    if (effDepthZ > 0.001) {
+      const numCellsZ = Math.max(1, Math.round(effDepthZ / snapSize));
+      if (numCellsZ % 2 === 1) {
+        pos.z = (Math.floor(pos.z / snapSize) + 0.5) * snapSize;
+      } else {
+        pos.z = Math.round(pos.z / snapSize) * snapSize;
+      }
+    } else {
+      pos.z = Math.round(pos.z / snapSize) * snapSize;
+    }
   }
 
   _initGrid(cellSize = 32.0) {
@@ -202,6 +267,7 @@ export class SceneManager {
     if (enabled) {
       this.transformControls.setTranslationSnap(this.snapSize);
       this.transformControls.setRotationSnap(THREE.MathUtils.degToRad(15));
+      this.selectedObjects.forEach(obj => this.snapObjectToGrid(obj));
     } else {
       this.transformControls.setTranslationSnap(null);
       this.transformControls.setRotationSnap(null);

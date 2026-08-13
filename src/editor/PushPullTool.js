@@ -315,7 +315,7 @@ export class PushPullTool {
     if (ud.type === 'polygon') {
       this._extrudePolygon(mesh, depth);
     } else if (ud.type === 'quad') {
-      QuadFactory.extrudeQuad(mesh, depth);
+      QuadFactory.extrudeQuad(mesh, depth, ud.textureSides !== false);
       ud.extrusionDepth = depth;
     } else if (ud.type === 'box') {
       this._extrudeBox(mesh, faceNormal, materialIndex, depth);

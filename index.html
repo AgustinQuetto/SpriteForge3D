@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,8 +8,11 @@
   <title>Sprite3D — 2D to 3D Editor</title>
   <link rel="stylesheet" href="/src/styles/index.css">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap"
+    rel="stylesheet">
 </head>
+
 <body>
   <!-- Top Toolbar -->
   <header id="toolbar">
@@ -219,20 +223,27 @@
             <small>or click to browse</small>
             <input type="file" id="file-input" accept="image/png" multiple hidden>
           </div>
-          
-          <div id="slicer-controls" style="display:none; margin:12px 0; padding:10px; background:var(--bg-panel); border:1px solid var(--border); border-radius:6px;">
-            <div style="font-size:11px; margin-bottom:8px; color:var(--text-secondary)">Slice <strong id="slicer-target-name" style="color:var(--text)"></strong></div>
+
+          <div id="slicer-controls"
+            style="display:none; margin:12px 0; padding:10px; background:var(--bg-panel); border:1px solid var(--border); border-radius:6px;">
+            <div style="font-size:11px; margin-bottom:8px; color:var(--text-secondary)">Slice <strong
+                id="slicer-target-name" style="color:var(--text)"></strong></div>
             <div style="display:flex; gap:8px; margin-bottom:8px">
-              <div style="flex:1; display:flex; align-items:center; background:var(--bg-input); border:1px solid var(--border); border-radius:4px; padding:2px">
+              <div
+                style="flex:1; display:flex; align-items:center; background:var(--bg-input); border:1px solid var(--border); border-radius:4px; padding:2px">
                 <span style="font-size:10px; color:var(--text-muted); padding:0 4px">W</span>
-                <input type="number" id="slicer-w" value="128" min="1" style="width:100%; min-width:0; background:none; border:none; color:var(--text); font-size:12px; outline:none">
+                <input type="number" id="slicer-w" value="128" min="1"
+                  style="width:100%; min-width:0; background:none; border:none; color:var(--text); font-size:12px; outline:none">
               </div>
-              <div style="flex:1; display:flex; align-items:center; background:var(--bg-input); border:1px solid var(--border); border-radius:4px; padding:2px">
+              <div
+                style="flex:1; display:flex; align-items:center; background:var(--bg-input); border:1px solid var(--border); border-radius:4px; padding:2px">
                 <span style="font-size:10px; color:var(--text-muted); padding:0 4px">H</span>
-                <input type="number" id="slicer-h" value="128" min="1" style="width:100%; min-width:0; background:none; border:none; color:var(--text); font-size:12px; outline:none">
+                <input type="number" id="slicer-h" value="128" min="1"
+                  style="width:100%; min-width:0; background:none; border:none; color:var(--text); font-size:12px; outline:none">
               </div>
             </div>
-            <button id="btn-slice-asset" class="prop-btn prop-btn-accent" style="width:100%; padding:4px 0; font-size:12px">
+            <button id="btn-slice-asset" class="prop-btn prop-btn-accent"
+              style="width:100%; padding:4px 0; font-size:12px">
               <span class="material-symbols-rounded" style="font-size:16px;">grid_on</span>
               Slice SpriteSheet
             </button>
@@ -279,7 +290,7 @@
   </main>
 
   <script type="module" src="/src/main.js"></script>
- 
+
   <!-- Context Menu -->
   <div id="context-menu" class="context-menu" style="display:none">
     <div class="context-item" id="menu-duplicate">
@@ -314,4 +325,5 @@
     </div>
   </div>
 </body>
+
 </html>

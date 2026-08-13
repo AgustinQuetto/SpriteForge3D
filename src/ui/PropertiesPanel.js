@@ -92,14 +92,29 @@ export class PropertiesPanel {
 
       ${showExtrusion ? `
       <div class="prop-section">
-        <div class="prop-section-title">Extrusion (Thickness)</div>
+        <div class="prop-section-title">Extrusion (Thickness / Grosor)</div>
         <div class="prop-slider-row">
           <span class="prop-slider-label">Depth</span>
-          <input type="range" class="prop-slider" id="prop-extrude" min="0" max="3" step="0.01" value="${depth}">
-          <span class="prop-slider-value" id="prop-extrude-val">${depth.toFixed(2)}</span>
+          <input type="range" class="prop-slider" id="prop-extrude" min="0" max="128" step="1" value="${depth}">
+          <input type="number" class="prop-input" id="prop-extrude-num" min="0" max="512" step="1" value="${depth.toFixed(1)}" style="width:60px;margin-left:8px">
         </div>
-        <small style="color:var(--text-muted);display:block;margin-top:-4px;margin-bottom:8px">
-          Slide right to make the plane thick
+        <div class="prop-row" style="margin-top:8px">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text-secondary)">
+            <input type="checkbox" id="prop-texture-sides" ${mesh.userData.textureSides !== false ? 'checked' : ''}>
+            Pattern on side faces (Patrón)
+          </label>
+        </div>
+        <div class="prop-row" style="margin-top:6px">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text-secondary)">
+            <input type="checkbox" id="prop-voxelize" ${mesh.userData.voxelized ? 'checked' : ''} ${!hasTexture ? 'disabled' : ''}>
+            <span style="display:flex;flex-direction:column;gap:1px">
+              <strong style="color:var(--text);font-weight:600">Voxelize (Pixel Cubes)</strong>
+              <span style="font-size:11px">Convierte cada píxel en un cubo 3D</span>
+            </span>
+          </label>
+        </div>
+        <small style="color:var(--text-muted);display:block;margin-top:4px;margin-bottom:8px">
+          Extrudes flat sprites into 3D walls & tiles texture pattern seamlessly
         </small>
       </div>
       ` : ''}
@@ -175,15 +190,57 @@ export class PropertiesPanel {
     this._on('prop-sy', 'change', (e) => { mesh.scale.y = parseFloat(e.target.value) || 1; });
     this._on('prop-sz', 'change', (e) => { mesh.scale.z = parseFloat(e.target.value) || 1; });
 
-    // Extrusion slider
+    // Extrusion slider & numeric input
     const slider = document.getElementById('prop-extrude');
-    const sliderVal = document.getElementById('prop-extrude-val');
+    const numInput = document.getElementById('prop-extrude-num');
+    const texSidesCheckbox = document.getElementById('prop-texture-sides');
+
+    const applyExtrusion = (newDepth) => {
+      const textureSides = texSidesCheckbox ? texSidesCheckbox.checked : true;
+      QuadFactory.extrudeQuad(mesh, newDepth, textureSides);
+      if (this.onExtrusionChanged) this.onExtrusionChanged(mesh, newDepth);
+    };
+
     if (slider) {
       slider.addEventListener('input', (e) => {
-        const depth = parseFloat(e.target.value);
-        sliderVal.textContent = depth.toFixed(2);
-        QuadFactory.extrudeQuad(mesh, depth);
-        if (this.onExtrusionChanged) this.onExtrusionChanged(mesh, depth);
+        const val = parseFloat(e.target.value) || 0;
+        if (numInput) numInput.value = val.toFixed(1);
+        applyExtrusion(val);
+      });
+    }
+
+    if (numInput) {
+      numInput.addEventListener('change', (e) => {
+        const val = Math.max(0, parseFloat(e.target.value) || 0);
+        if (slider) slider.value = Math.min(128, val);
+        applyExtrusion(val);
+      });
+    }
+
+    if (texSidesCheckbox) {
+      texSidesCheckbox.addEventListener('change', () => {
+        const d = mesh.userData.extrusionDepth || 0;
+        applyExtrusion(d);
+      });
+    }
+
+    // Voxelize toggle
+    const voxelizeCheckbox = document.getElementById('prop-voxelize');
+    if (voxelizeCheckbox) {
+      voxelizeCheckbox.addEventListener('change', (e) => {
+        if (e.target.checked) {
+          QuadFactory.voxelizeSprite(mesh);
+          // Disable extrusion controls while voxelized
+          if (slider) slider.disabled = true;
+          if (numInput) numInput.disabled = true;
+          if (texSidesCheckbox) texSidesCheckbox.disabled = true;
+        } else {
+          QuadFactory.devoxelizeSprite(mesh);
+          if (slider) slider.disabled = false;
+          if (numInput) numInput.disabled = false;
+          if (texSidesCheckbox) texSidesCheckbox.disabled = false;
+        }
+        if (this.onVoxelizeChanged) this.onVoxelizeChanged(mesh, e.target.checked);
       });
     }
 

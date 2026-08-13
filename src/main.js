@@ -192,7 +192,7 @@ propsPanel.onApplyTexture = async (mesh) => {
     showToast('Select an asset in the left panel first!');
     return;
   }
-  
+
   // Clone texture so each object has its own material
   const tex = asset.texture.clone();
   tex.needsUpdate = true;
@@ -207,11 +207,11 @@ propsPanel.onApplyTexture = async (mesh) => {
   }
 
   UVExporter.applyAtlas(mesh, tex);
-  
+
   // Re-render properties to update the apply texture button state
   propsPanel.showProperties(mesh);
   showToast(`Applied texture "${asset.name}" to ${mesh.name}`);
-  
+
   // Record in history
   history.push({
     label: `Apply Texture`,
@@ -308,13 +308,13 @@ canvas.addEventListener('click', (e) => {
     scene.selectObject(picked, additive);
   } else {
     const selectedAssets = assetPanel.selectedAssets;
-    
+
     // Prioritize deselecting current 3D objects if anything is selected
     if (scene.selectedObjects.length > 0) {
       scene.deselectObject();
       propsPanel.showEmpty();
       hierarchy.refresh();
-    } 
+    }
     // If nothing 3D is selected and we have active assets, place them
     else if (selectedAssets && selectedAssets.length > 0) {
       if (selectedAssets.length === 1) {
@@ -323,7 +323,7 @@ canvas.addEventListener('click', (e) => {
         placeAssetsGrid(selectedAssets, e.clientX, e.clientY);
       }
       assetPanel.clearSelection(); // Prevent multiple accidental placements
-    } 
+    }
     // Otherwise just deselect/clear
     else {
       scene.deselectObject();
@@ -417,9 +417,7 @@ function placeAsset(asset, clientX, clientY) {
     mesh.position.set(worldPos.x, 0, worldPos.z);
 
     if (scene.snapEnabled) {
-      mesh.position.x = Math.round(mesh.position.x / scene.snapSize) * scene.snapSize;
-      mesh.position.y = Math.round(mesh.position.y / scene.snapSize) * scene.snapSize;
-      mesh.position.z = Math.round(mesh.position.z / scene.snapSize) * scene.snapSize;
+      scene.snapObjectToGrid(mesh);
     }
   }
 
@@ -477,9 +475,7 @@ function placeAssetsGrid(assets, clientX, clientY) {
     mesh.position.set(startX + c * spacing, 0, startZ + r * spacing);
 
     if (scene.snapEnabled) {
-      mesh.position.x = Math.round(mesh.position.x / scene.snapSize) * scene.snapSize;
-      mesh.position.y = Math.round(mesh.position.y / scene.snapSize) * scene.snapSize;
-      mesh.position.z = Math.round(mesh.position.z / scene.snapSize) * scene.snapSize;
+      scene.snapObjectToGrid(mesh);
     }
 
     scene.addObject(mesh);
@@ -521,6 +517,10 @@ function placePrimitive(type) {
   // Place it slightly in front of the camera focus or at origin
   mesh.position.set(0, 0, 0);
 
+  if (scene.snapEnabled) {
+    scene.snapObjectToGrid(mesh);
+  }
+
   scene.addObject(mesh);
   scene.selectObject(mesh);
   hierarchy.refresh();
@@ -545,29 +545,29 @@ document.getElementById('btn-add-cylinder').addEventListener('click', () => plac
 function duplicateSelected() {
   const selection = [...scene.selectedObjects];
   if (selection.length === 0) return;
- 
+
   const clones = selection.map(obj => QuadFactory.duplicate(obj));
-  
+
   scene.deselectObject();
   clones.forEach(clone => {
     scene.addObject(clone);
     scene.selectObject(clone, true); // additive selection
   });
-  
+
   hierarchy.refresh();
- 
+
   history.push({
     label: `Duplicate ${selection.length} objects`,
-    undo: () => { 
-      clones.forEach(c => scene.removeObject(c)); 
-      hierarchy.refresh(); 
+    undo: () => {
+      clones.forEach(c => scene.removeObject(c));
+      hierarchy.refresh();
     },
-    redo: () => { 
-      clones.forEach(c => scene.addObject(c)); 
-      hierarchy.refresh(); 
+    redo: () => {
+      clones.forEach(c => scene.addObject(c));
+      hierarchy.refresh();
     }
   });
- 
+
   showToast(`Duplicated ${selection.length} object(s)`);
 }
 
@@ -682,7 +682,7 @@ document.getElementById('btn-tool-push-pull').addEventListener('click', () => se
 document.getElementById('btn-vertex-edit').addEventListener('click', () => {
   isVertexEditMode = !isVertexEditMode;
   document.getElementById('btn-vertex-edit').classList.toggle('active', isVertexEditMode);
-  
+
   if (isVertexEditMode) {
     if (scene.selectedObjects.length === 1) {
       vertexEditor.enable(scene.selectedObjects[0]);
@@ -710,7 +710,7 @@ document.getElementById('input-grid-size').addEventListener('change', (e) => {
   scene.updateGrid(size);
   showToast(`Grid size updated to ${size}px`);
 });
- 
+
 // Snap toggle
 let snapOn = false;
 document.getElementById('btn-snap').addEventListener('click', () => {
@@ -959,27 +959,27 @@ function loadProject(file) {
     try {
       const project = JSON.parse(e.target.result);
       if (!project.assets || !project.objects) throw new Error('Invalid project file');
-      
+
       // Clear current state
       scene.clear();
       hierarchy.refresh();
       history.clear();
       propsPanel.showEmpty();
-      
+
       // Clear UI assets
       assetPanel.assets = [];
       assetPanel.selectedAsset = null;
       document.getElementById('asset-grid').innerHTML = '';
-      
+
       // Load images asynchronously
       let loadedAssets = 0;
       const totalAssets = project.assets.length;
-      
+
       if (totalAssets === 0) {
         reconstructObjects(project.objects);
         return;
       }
-      
+
       project.assets.forEach(assetData => {
         const img = new Image();
         img.onload = () => {
@@ -992,7 +992,7 @@ function loadProject(file) {
           const asset = { name: assetData.name, texture, image: img, dataUrl: assetData.dataUrl };
           assetPanel.assets.push(asset);
           assetPanel._addThumbnail(asset);
-          
+
           loadedAssets++;
           if (loadedAssets === totalAssets) {
             reconstructObjects(project.objects);
@@ -1000,7 +1000,7 @@ function loadProject(file) {
         };
         img.src = assetData.dataUrl;
       });
-      
+
     } catch (err) {
       showToast('Error loading project');
       console.error(err);
@@ -1016,37 +1016,37 @@ function reconstructObjects(objectDataList) {
     if (data.textureName) {
       const asset = assetPanel.assets.find(a => a.name === data.textureName);
       if (asset) {
-         baseTex = asset.texture.clone();
-         baseTex.needsUpdate = true;
+        baseTex = asset.texture.clone();
+        baseTex.needsUpdate = true;
       }
     }
-    
+
     if (data.type === 'plane') mesh = QuadFactory.createPlane(data.originalWidth, data.originalHeight);
     else if (data.type === 'cube') mesh = QuadFactory.createCube(data.originalWidth, data.originalHeight, data.extrusionDepth);
-    else if (data.type === 'cylinder') mesh = QuadFactory.createCylinder(data.originalWidth/2, data.originalHeight);
+    else if (data.type === 'cylinder') mesh = QuadFactory.createCylinder(data.originalWidth / 2, data.originalHeight);
     else if (data.type === 'quad' || data.type === 'box') {
-       if (baseTex) {
-         mesh = QuadFactory.createQuad(baseTex, data.name);
-       } else {
-          mesh = QuadFactory.createPlane(data.originalWidth, data.originalHeight);
-       }
+      if (baseTex) {
+        mesh = QuadFactory.createQuad(baseTex, data.name);
+      } else {
+        mesh = QuadFactory.createPlane(data.originalWidth, data.originalHeight);
+      }
     } else continue;
-    
+
     mesh.name = data.name;
     mesh.position.set(...data.position);
     mesh.rotation.set(...data.rotation);
     mesh.scale.set(...data.scale);
-    
+
     // Apply texture to primitives
     if (baseTex && (data.type === 'plane' || data.type === 'cube' || data.type === 'cylinder')) {
-        QuadFactory.applyTexture(mesh, baseTex);
+      QuadFactory.applyTexture(mesh, baseTex);
     }
-    
+
     // Re-apply extrusion if it was an extruded quad
     if (data.type === 'box' && data.extrusionDepth > 0 && baseTex) {
-       QuadFactory.extrudeQuad(mesh, data.extrusionDepth);
+      QuadFactory.extrudeQuad(mesh, data.extrusionDepth);
     }
-    
+
     // Setup and apply UV Mapping (Tiling/Offset)
     mesh.userData.uvRepeat = data.uvRepeat || [1, 1];
     mesh.userData.uvOffset = data.uvOffset || [0, 0];
@@ -1064,10 +1064,10 @@ function reconstructObjects(objectDataList) {
     } else {
       applyMappingToMaterial(mesh.material);
     }
-    
+
     scene.addObject(mesh);
   }
-  
+
   hierarchy.refresh();
   showToast('Project loaded successfully');
 }
@@ -1092,7 +1092,7 @@ document.getElementById('file-load-project').addEventListener('change', (e) => {
 // ──────────────────────────────────────────────
 //  Context Menu
 // ──────────────────────────────────────────────
- 
+
 const contextMenu = document.getElementById('context-menu');
 let contextTarget = null;
 
@@ -1115,7 +1115,7 @@ function getRecommendedUVResolution(mesh) {
   if (maxTextureSide <= 0) return 2048;
   return THREE.MathUtils.clamp(maxTextureSide, 512, 4096);
 }
- 
+
 canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
 
@@ -1151,14 +1151,14 @@ canvas.addEventListener('contextmenu', (e) => {
   contextMenu.style.left = `${left}px`;
   contextMenu.style.top = `${top}px`;
 });
- 
+
 // Hide menu on click elsewhere
 window.addEventListener('click', (e) => {
   if (!contextMenu.contains(e.target)) {
     contextMenu.style.display = 'none';
   }
 });
- 
+
 document.getElementById('menu-duplicate').addEventListener('click', () => {
   duplicateSelected();
   contextMenu.style.display = 'none';
@@ -1178,7 +1178,7 @@ document.getElementById('menu-ungroup').addEventListener('click', () => {
   ungroupSelected();
   contextMenu.style.display = 'none';
 });
- 
+
 document.getElementById('menu-export-uv').addEventListener('click', async () => {
   const target = contextTarget;
   if (target) {
@@ -1197,7 +1197,7 @@ document.getElementById('menu-export-uv').addEventListener('click', async () => 
   }
   contextMenu.style.display = 'none';
 });
- 
+
 document.getElementById('menu-load-texture').addEventListener('click', () => {
   const target = contextTarget;
   if (!target) {
@@ -1211,7 +1211,7 @@ document.getElementById('menu-load-texture').addEventListener('click', () => {
   input.onchange = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    
+
     const reader = new FileReader();
     reader.onload = (rev) => {
       const img = new Image();
@@ -1230,7 +1230,7 @@ document.getElementById('menu-load-texture').addEventListener('click', () => {
           showToast(`Failed to apply real UV on ${target.name}: ${unwrapErr.message}`);
           return;
         }
- 
+
         UVExporter.applyAtlas(target, texture);
         showToast(`Custom texture applied to ${target.name}`);
       };
@@ -1241,12 +1241,12 @@ document.getElementById('menu-load-texture').addEventListener('click', () => {
   input.click();
   contextMenu.style.display = 'none';
 });
- 
+
 function animate() {
   requestAnimationFrame(animate);
   scene.render();
 }
- 
+
 animate();
 
 // Initial UI state

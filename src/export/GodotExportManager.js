@@ -138,10 +138,10 @@ export class GodotExportManager {
           
           const id = itemIds[sig];
           if (id !== undefined) {
-              const x = Math.round(child.position.x / 32);
-              const y = Math.round(child.position.y / 32);
+              const x = Math.floor(child.position.x / 32);
+              const y = Math.floor(child.position.y / 32);
               // In Godot, Z points towards viewer. Same as Three.js, but GridMap Z can be identical or inverted based on user layout.
-              const z = Math.round(child.position.z / 32);
+              const z = Math.floor(child.position.z / 32);
               
               // Handle very basic Y rotation for the tile mapping
               let rotIndex = 0; // default orientation
