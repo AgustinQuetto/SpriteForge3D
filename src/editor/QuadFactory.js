@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { ALPHA_THRESHOLD, getImageDataFromMesh } from './PixelUtils.js';
 
 /**
  * QuadFactory — Creates textured planes and boxes from sprite textures.
@@ -385,45 +386,54 @@ export class QuadFactory {
     return clone;
   }
   /**
-   * Voxelize a sprite mesh: each non-transparent pixel becomes a 1×1×1 coloured cube.
-   * The resulting merged mesh replaces the original flat quad.
-   * @param {THREE.Mesh} mesh - must have mesh.userData.texture with a valid image
-   * @param {number} pixelSize - world-unit size of each voxel cube (default 1)
-   * @returns {THREE.Mesh} the same mesh, mutated in-place
+   * Voxelize a sprite mesh: each non-transparent pixel becomes a coloured cube.
+   * Optional per-pixel depth from mesh.userData.voxelDepthMap (relief).
+   * @param {THREE.Mesh} mesh
+   * @param {number} pixelSize
+   * @returns {THREE.Mesh}
    */
   static voxelizeSprite(mesh, pixelSize = 1) {
-    const texture = mesh.userData.texture;
-    if (!texture || !texture.image) {
+    const imageData = getImageDataFromMesh(mesh);
+    if (!imageData) {
       console.warn('voxelizeSprite: mesh has no texture image');
       return mesh;
     }
 
-    const img = texture.image;
-    const imgW = img.naturalWidth || img.width;
-    const imgH = img.naturalHeight || img.height;
-
-    if (!imgW || !imgH) {
-      console.warn('voxelizeSprite: image has no dimensions');
-      return mesh;
+    const { width, height } = imageData;
+    if (width * height > 4096) {
+      console.warn(`voxelizeSprite: large sprite (${width}×${height}), this may be slow`);
     }
 
-    // Warn if sprite is large — voxelizing can be expensive
-    if (imgW * imgH > 4096) {
-      console.warn(`voxelizeSprite: large sprite (${imgW}×${imgH}), this may be slow`);
+    const size = width * height;
+    if (!mesh.userData.voxelDepthMap || mesh.userData.voxelDepthMap.length !== size) {
+      mesh.userData.voxelDepthMap = new Uint16Array(size);
     }
+    mesh.userData.voxelSelection = new Uint8Array(size);
+    mesh.userData.voxelImageWidth = width;
+    mesh.userData.voxelImageHeight = height;
+    mesh.userData.voxelPixelSize = pixelSize;
 
-    // Read pixels via an OffscreenCanvas
-    const canvas = new OffscreenCanvas(imgW, imgH);
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0, imgW, imgH);
-    const { data } = ctx.getImageData(0, 0, imgW, imgH);
+    return QuadFactory.rebuildVoxelGeometry(mesh);
+  }
 
-    // Collect voxel positions and colours (only opaque/semi-transparent pixels)
-    const ALPHA_THRESHOLD = 30; // 0-255; pixels below are skipped
+  /**
+   * Rebuild merged voxel geometry from texture + depth map.
+   * @param {THREE.Mesh} mesh — must be voxelized or about to be
+   * @returns {THREE.Mesh}
+   */
+  static rebuildVoxelGeometry(mesh) {
+    const imageData = getImageDataFromMesh(mesh);
+    if (!imageData) return mesh;
+
+    const { data, width: imgW, height: imgH } = imageData;
+    const pixelSize = mesh.userData.voxelPixelSize || 1;
+    const depthMap = mesh.userData.voxelDepthMap || new Uint16Array(imgW * imgH);
+
     const voxels = [];
     for (let row = 0; row < imgH; row++) {
       for (let col = 0; col < imgW; col++) {
-        const i = (row * imgW + col) * 4;
+        const pi = row * imgW + col;
+        const i = pi * 4;
         const a = data[i + 3];
         if (a < ALPHA_THRESHOLD) continue;
         voxels.push({
@@ -432,85 +442,102 @@ export class QuadFactory {
           r: data[i],
           g: data[i + 1],
           b: data[i + 2],
-          a
+          depth: depthMap[pi] || 0,
         });
       }
     }
 
     if (voxels.length === 0) {
-      console.warn('voxelizeSprite: no opaque pixels found');
+      console.warn('rebuildVoxelGeometry: no opaque pixels found');
       return mesh;
     }
 
-    // Build merged geometry manually using a BoxGeometry template
-    const boxTemplate = new THREE.BoxGeometry(pixelSize, pixelSize, pixelSize);
-    const posAttr = boxTemplate.getAttribute('position');
-    const normAttr = boxTemplate.getAttribute('normal');
-    const uvAttr = boxTemplate.getAttribute('uv');
-    const indexAttr = boxTemplate.getIndex();
-    const vertsPerBox = posAttr.count;
-    const indicesPerBox = indexAttr.count;
+    const srgbToLinear = (c) => {
+      const s = c / 255;
+      return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
 
-    const totalVerts = voxels.length * vertsPerBox;
+    const originX = -imgW * pixelSize / 2 + pixelSize / 2;
+    const originY = pixelSize / 2;
+
+    let totalVerts = 0;
+    let totalIndices = 0;
+    const boxParts = [];
+
+    for (const voxel of voxels) {
+      const depthLayers = 1 + voxel.depth;
+      const boxDepth = pixelSize * depthLayers;
+      const box = new THREE.BoxGeometry(pixelSize, pixelSize, boxDepth);
+      const posAttr = box.getAttribute('position');
+      const normAttr = box.getAttribute('normal');
+      const uvAttr = box.getAttribute('uv');
+      const indexAttr = box.getIndex();
+
+      const voxelX = originX + voxel.col * pixelSize;
+      const voxelY = originY + (imgH - 1 - voxel.row) * pixelSize;
+      const voxelZ = (voxel.depth * pixelSize) / 2;
+
+      boxParts.push({
+        positions: posAttr.array.slice(),
+        normals: normAttr.array.slice(),
+        uvs: uvAttr.array.slice(),
+        indices: indexAttr.array.slice(),
+        vertCount: posAttr.count,
+        voxelX, voxelY, voxelZ,
+        colourR: srgbToLinear(voxel.r),
+        colourG: srgbToLinear(voxel.g),
+        colourB: srgbToLinear(voxel.b),
+      });
+
+      totalVerts += posAttr.count;
+      totalIndices += indexAttr.count;
+      box.dispose();
+    }
+
     const positions = new Float32Array(totalVerts * 3);
     const normals = new Float32Array(totalVerts * 3);
     const uvs = new Float32Array(totalVerts * 2);
     const colors = new Float32Array(totalVerts * 3);
-    const indices = new Uint32Array(voxels.length * indicesPerBox);
+    const indices = new Uint32Array(totalIndices);
 
-    // Sprite origin matches createQuad: bottom-left is (0, 0), Y grows upward
-    // col 0 = left edge, row 0 = top of sprite (image row 0 = top)
-    const originX = -imgW * pixelSize / 2 + pixelSize / 2;   // centre horizontally
-    const originY = pixelSize / 2;                              // bottom pivot
+    let vertOffset = 0;
+    let idxOffset = 0;
 
-    for (let vi = 0; vi < voxels.length; vi++) {
-      const { col, row, r, g, b } = voxels[vi];
+    for (const part of boxParts) {
+      const {
+        positions: boxPos, normals: boxNorm, uvs: boxUv, indices: boxIdx,
+        vertCount, voxelX, voxelY, voxelZ, colourR, colourG, colourB,
+      } = part;
+      const vertBase = vertOffset;
 
-      // Flip row: image row=0 is top, but our Y grows up, so row=0 → highest Y
-      const voxelX = originX + col * pixelSize;
-      const voxelY = originY + (imgH - 1 - row) * pixelSize;
-      const voxelZ = 0;
-
-      // Convert sRGB (getImageData values) → linear colour space.
-      // getImageData returns perceptual (sRGB) values; Three.js vertex colours
-      // are in linear space, so a direct /255 makes them appear too bright/washed.
-      const srgbToLinear = (c) => {
-        const s = c / 255;
-        return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-      };
-
-      const colourR = srgbToLinear(r);
-      const colourG = srgbToLinear(g);
-      const colourB = srgbToLinear(b);
-
-      const vertBase = vi * vertsPerBox;
-
-      for (let v = 0; v < vertsPerBox; v++) {
+      for (let v = 0; v < vertCount; v++) {
+        const src = v * 3;
         const dst = (vertBase + v) * 3;
-        positions[dst]     = posAttr.getX(v) + voxelX;
-        positions[dst + 1] = posAttr.getY(v) + voxelY;
-        positions[dst + 2] = posAttr.getZ(v) + voxelZ;
+        positions[dst]     = boxPos[src] + voxelX;
+        positions[dst + 1] = boxPos[src + 1] + voxelY;
+        positions[dst + 2] = boxPos[src + 2] + voxelZ;
 
-        normals[dst]     = normAttr.getX(v);
-        normals[dst + 1] = normAttr.getY(v);
-        normals[dst + 2] = normAttr.getZ(v);
+        normals[dst]     = boxNorm[src];
+        normals[dst + 1] = boxNorm[src + 1];
+        normals[dst + 2] = boxNorm[src + 2];
 
         colors[dst]     = colourR;
         colors[dst + 1] = colourG;
         colors[dst + 2] = colourB;
 
+        const uvSrc = v * 2;
         const uvDst = (vertBase + v) * 2;
-        uvs[uvDst]     = uvAttr.getX(v);
-        uvs[uvDst + 1] = uvAttr.getY(v);
+        uvs[uvDst]     = boxUv[uvSrc];
+        uvs[uvDst + 1] = boxUv[uvSrc + 1];
       }
 
-      const idxBase = vi * indicesPerBox;
-      for (let idx = 0; idx < indicesPerBox; idx++) {
-        indices[idxBase + idx] = indexAttr.getX(idx) + vertBase;
+      for (let idx = 0; idx < boxIdx.length; idx++) {
+        indices[idxOffset + idx] = boxIdx[idx] + vertBase;
       }
+
+      vertOffset += vertCount;
+      idxOffset += boxIdx.length;
     }
-
-    boxTemplate.dispose();
 
     const mergedGeom = new THREE.BufferGeometry();
     mergedGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -520,8 +547,7 @@ export class QuadFactory {
     mergedGeom.setIndex(new THREE.BufferAttribute(indices, 1));
     mergedGeom.computeBoundingSphere();
 
-    // Dispose old geometry + material
-    mesh.geometry.dispose();
+    mesh.geometry?.dispose();
     if (Array.isArray(mesh.material)) {
       mesh.material.forEach(m => m.dispose());
     } else if (mesh.material) {
@@ -537,9 +563,38 @@ export class QuadFactory {
 
     mesh.userData.voxelized = true;
     mesh.userData.voxelPixelSize = pixelSize;
+    mesh.userData.voxelImageWidth = imgW;
+    mesh.userData.voxelImageHeight = imgH;
     mesh.userData.type = 'voxel';
 
     return mesh;
+  }
+
+  /**
+   * Apply depth delta to selected pixels and rebuild geometry.
+   * @param {THREE.Mesh} mesh
+   * @param {number} delta — positive = extract, negative = subtract
+   * @param {number} maxDepth
+   * @returns {boolean} whether any pixel changed
+   */
+  static applyVoxelDepthDelta(mesh, delta, maxDepth = 64) {
+    const selection = mesh.userData.voxelSelection;
+    const depthMap = mesh.userData.voxelDepthMap;
+    if (!selection || !depthMap) return false;
+
+    let changed = false;
+    for (let i = 0; i < selection.length; i++) {
+      if (!selection[i]) continue;
+      const prev = depthMap[i];
+      const next = Math.max(0, Math.min(maxDepth, prev + delta));
+      if (next !== prev) {
+        depthMap[i] = next;
+        changed = true;
+      }
+    }
+
+    if (changed) QuadFactory.rebuildVoxelGeometry(mesh);
+    return changed;
   }
 
   /**

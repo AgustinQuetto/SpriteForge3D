@@ -13,6 +13,14 @@ export class PropertiesPanel {
     this.onDuplicate = null;
     this.onDelete = null;
     this.onApplyTexture = null;
+    this.onReliefExtract = null;
+    this.onReliefSubtract = null;
+    this.onReliefClearSelection = null;
+    this.onReliefToleranceChanged = null;
+    this.onReliefDepthStepChanged = null;
+    this.onReliefActivateTool = null;
+    this.onReliefSelectionModeChanged = null;
+    this.reliefSelectionMode = 'wand';
 
     this.showEmpty();
   }
@@ -35,6 +43,10 @@ export class PropertiesPanel {
 
     // Show extrusion only for quads (flat planes that can be extruded)
     const showExtrusion = (objType === 'quad' || objType === 'box');
+    const showVoxelRelief = objType === 'voxel';
+    const selectedPixels = mesh.userData.voxelSelection
+      ? mesh.userData.voxelSelection.reduce((n, v) => n + (v ? 1 : 0), 0)
+      : 0;
 
     this.body.innerHTML = `
       <div class="prop-section">
@@ -119,6 +131,61 @@ export class PropertiesPanel {
       </div>
       ` : ''}
 
+      ${showVoxelRelief ? `
+      <div class="prop-section">
+        <div class="prop-section-title">Voxel Relief (Relieve)</div>
+        <div class="prop-section-title" style="margin-top:0;margin-bottom:6px;font-size:11px;color:var(--text-muted)">Selection mode</div>
+        <div class="relief-mode-row" style="display:flex;gap:4px;margin-bottom:10px">
+          <button type="button" class="prop-btn relief-mode-btn ${this._reliefModeActive('wand')}" data-relief-mode="wand" style="flex:1;padding:6px 4px;font-size:11px">
+            <span class="material-symbols-rounded" style="font-size:16px">auto_fix</span>
+            Wand
+          </button>
+          <button type="button" class="prop-btn relief-mode-btn ${this._reliefModeActive('pixel')}" data-relief-mode="pixel" style="flex:1;padding:6px 4px;font-size:11px">
+            <span class="material-symbols-rounded" style="font-size:16px">ads_click</span>
+            Pixel
+          </button>
+          <button type="button" class="prop-btn relief-mode-btn ${this._reliefModeActive('area')}" data-relief-mode="area" style="flex:1;padding:6px 4px;font-size:11px">
+            <span class="material-symbols-rounded" style="font-size:16px">crop_free</span>
+            Area
+          </button>
+        </div>
+        <div class="prop-slider-row" id="prop-relief-tolerance-row">
+          <span class="prop-slider-label">Tolerance</span>
+          <input type="range" class="prop-slider" id="prop-relief-tolerance" min="0" max="128" step="1" value="32">
+          <input type="number" class="prop-input" id="prop-relief-tolerance-num" min="0" max="255" step="1" value="32" style="width:60px;margin-left:8px">
+        </div>
+        <div class="prop-slider-row" style="margin-top:8px">
+          <span class="prop-slider-label">Depth step</span>
+          <input type="range" class="prop-slider" id="prop-relief-depth-step" min="1" max="8" step="1" value="1">
+          <input type="number" class="prop-input" id="prop-relief-depth-step-num" min="1" max="32" step="1" value="1" style="width:60px;margin-left:8px">
+        </div>
+        <small style="color:var(--text-muted);display:block;margin-top:6px;margin-bottom:8px" id="prop-relief-hint">
+          ${this._reliefModeHint()}
+        </small>
+        <div style="margin-bottom:8px;font-size:12px;color:var(--text-secondary)" id="prop-relief-selection-count">
+          ${selectedPixels} pixel${selectedPixels !== 1 ? 's' : ''} selected
+        </div>
+        <button class="prop-btn prop-btn-accent" id="btn-relief-wand" style="margin-bottom:6px">
+          <span class="material-symbols-rounded">draw</span>
+          Activate Relief Tool (M)
+        </button>
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <button class="prop-btn" id="btn-relief-extract" style="flex:1">
+            <span class="material-symbols-rounded">add</span>
+            Extract (+)
+          </button>
+          <button class="prop-btn" id="btn-relief-subtract" style="flex:1">
+            <span class="material-symbols-rounded">remove</span>
+            Subtract (−)
+          </button>
+        </div>
+        <button class="prop-btn" id="btn-relief-clear">
+          <span class="material-symbols-rounded">deselect</span>
+          Clear Selection
+        </button>
+      </div>
+      ` : ''}
+
       <div class="prop-section">
         <div class="prop-section-title">Texture</div>
         <div style="margin-bottom:8px;text-align:center;padding:6px;background:var(--bg-input);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary)">
@@ -169,6 +236,7 @@ export class PropertiesPanel {
     `;
 
     this._bindInputs(mesh);
+    if (showVoxelRelief) this._bindReliefControls(mesh);
   }
 
   _bindInputs(mesh) {
@@ -230,7 +298,6 @@ export class PropertiesPanel {
       voxelizeCheckbox.addEventListener('change', (e) => {
         if (e.target.checked) {
           QuadFactory.voxelizeSprite(mesh);
-          // Disable extrusion controls while voxelized
           if (slider) slider.disabled = true;
           if (numInput) numInput.disabled = true;
           if (texSidesCheckbox) texSidesCheckbox.disabled = true;
@@ -241,6 +308,7 @@ export class PropertiesPanel {
           if (texSidesCheckbox) texSidesCheckbox.disabled = false;
         }
         if (this.onVoxelizeChanged) this.onVoxelizeChanged(mesh, e.target.checked);
+        this.showProperties(mesh);
       });
     }
 
@@ -290,6 +358,87 @@ export class PropertiesPanel {
     });
   }
 
+  _bindReliefControls(mesh) {
+    const tolSlider = document.getElementById('prop-relief-tolerance');
+    const tolNum = document.getElementById('prop-relief-tolerance-num');
+    const stepSlider = document.getElementById('prop-relief-depth-step');
+    const stepNum = document.getElementById('prop-relief-depth-step-num');
+    const tolRow = document.getElementById('prop-relief-tolerance-row');
+
+    if (tolRow) {
+      tolRow.style.display = this.reliefSelectionMode === 'wand' ? '' : 'none';
+    }
+
+    const syncTolerance = (val) => {
+      const v = Math.max(0, Math.min(255, val | 0));
+      if (tolSlider) tolSlider.value = Math.min(128, v);
+      if (tolNum) tolNum.value = v;
+      if (this.onReliefToleranceChanged) this.onReliefToleranceChanged(v);
+    };
+
+    if (tolSlider) {
+      tolSlider.addEventListener('input', (e) => syncTolerance(parseInt(e.target.value, 10)));
+    }
+    if (tolNum) {
+      tolNum.addEventListener('change', (e) => syncTolerance(parseInt(e.target.value, 10)));
+    }
+
+    const syncDepthStep = (val) => {
+      const v = Math.max(1, Math.min(32, val | 0));
+      if (stepSlider) stepSlider.value = Math.min(8, v);
+      if (stepNum) stepNum.value = v;
+      if (this.onReliefDepthStepChanged) this.onReliefDepthStepChanged(v);
+    };
+
+    if (stepSlider) {
+      stepSlider.addEventListener('input', (e) => syncDepthStep(parseInt(e.target.value, 10)));
+    }
+    if (stepNum) {
+      stepNum.addEventListener('change', (e) => syncDepthStep(parseInt(e.target.value, 10)));
+    }
+
+    document.querySelectorAll('.relief-mode-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.reliefMode;
+        if (!mode) return;
+        this.reliefSelectionMode = mode;
+        document.querySelectorAll('.relief-mode-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        if (tolRow) tolRow.style.display = mode === 'wand' ? '' : 'none';
+        const hint = document.getElementById('prop-relief-hint');
+        if (hint) hint.textContent = this._reliefModeHint(mode);
+        if (this.onReliefSelectionModeChanged) this.onReliefSelectionModeChanged(mode);
+      });
+    });
+
+    this._on('btn-relief-wand', 'click', () => {
+      if (this.onReliefActivateTool) this.onReliefActivateTool();
+    });
+    this._on('btn-relief-extract', 'click', () => {
+      if (this.onReliefExtract) this.onReliefExtract(mesh);
+    });
+    this._on('btn-relief-subtract', 'click', () => {
+      if (this.onReliefSubtract) this.onReliefSubtract(mesh);
+    });
+    this._on('btn-relief-clear', 'click', () => {
+      if (this.onReliefClearSelection) this.onReliefClearSelection(mesh);
+    });
+  }
+
+  _reliefModeActive(mode) {
+    return this.reliefSelectionMode === mode ? 'active' : '';
+  }
+
+  _reliefModeHint(mode = this.reliefSelectionMode) {
+    if (mode === 'pixel') {
+      return 'Píxel: click selecciona un voxel. Shift+click suma, Alt+click quita.';
+    }
+    if (mode === 'area') {
+      return 'Área: arrastra un rectángulo sobre el sprite. Shift+arrastrar suma a la selección.';
+    }
+    return 'Varita: click selecciona píxeles similares. Shift+click suma, Alt+click quita.';
+  }
+
   _on(id, event, handler) {
     const el = document.getElementById(id);
     if (el) el.addEventListener(event, handler);
@@ -312,5 +461,12 @@ export class PropertiesPanel {
     setVal('prop-sx', mesh.scale.x.toFixed(3));
     setVal('prop-sy', mesh.scale.y.toFixed(3));
     setVal('prop-sz', mesh.scale.z.toFixed(3));
+  }
+
+  updateReliefSelectionCount(count) {
+    const el = document.getElementById('prop-relief-selection-count');
+    if (el) {
+      el.textContent = `${count} pixel${count !== 1 ? 's' : ''} selected`;
+    }
   }
 }

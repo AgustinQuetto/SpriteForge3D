@@ -574,6 +574,17 @@ html, body {
   box-shadow: 0 0 12px var(--accent-glow);
 }
 
+.relief-mode-btn {
+  flex-direction: column;
+  gap: 2px;
+}
+
+.relief-mode-btn.active {
+  border-color: var(--accent);
+  background: rgba(99, 130, 255, 0.15);
+  color: var(--accent);
+}
+
 /* ── Face Assignment ───────────────── */
 .face-grid {
   display: grid;
@@ -908,4 +919,8 @@ html, body {
 
 #viewport.cursor-push-pull-active {
   cursor: ns-resize !important;
+}
+
+#viewport.cursor-voxel-relief {
+  cursor: crosshair !important;
 }

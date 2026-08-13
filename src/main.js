@@ -13,6 +13,8 @@ import { UVExporter } from './export/UVExporter.js';
 import { DrawingTool } from './editor/DrawingTool.js';
 import { PushPullTool } from './editor/PushPullTool.js';
 import { CutTool } from './editor/CutTool.js';
+import { VoxelReliefTool } from './editor/VoxelReliefTool.js';
+import { cloneVoxelState, restoreVoxelState, countMask } from './editor/PixelUtils.js';
 
 // ──────────────────────────────────────────────
 //  Initialize Systems
@@ -33,9 +35,17 @@ let isVertexEditMode = false;
 const drawingTool = new DrawingTool(scene);
 const pushPullTool = new PushPullTool(scene);
 const cutTool = new CutTool(scene);
+const voxelReliefTool = new VoxelReliefTool(scene);
 
-// Current tool mode: 'transform' | 'line' | 'rectangle' | 'push-pull' | 'cut'
+// Current tool mode: 'transform' | 'line' | 'rectangle' | 'push-pull' | 'cut' | 'voxel-relief'
 let toolMode = 'transform';
+let reliefAreaDragged = false;
+
+function reliefModeLabel(mode) {
+  if (mode === 'pixel') return 'Píxel';
+  if (mode === 'area') return 'Área';
+  return 'Varita';
+}
 
 function setToolMode(mode) {
   toolMode = mode;
@@ -44,12 +54,13 @@ function setToolMode(mode) {
   drawingTool.deactivate();
   pushPullTool.deactivate();
   cutTool.deactivate();
+  voxelReliefTool.deactivate();
 
   const viewport = document.getElementById('viewport');
-  viewport.classList.remove('cursor-crosshair', 'cursor-push-pull');
+  viewport.classList.remove('cursor-crosshair', 'cursor-push-pull', 'cursor-voxel-relief');
 
   // Reset draw button active states
-  ['btn-tool-line', 'btn-tool-rectangle', 'btn-tool-push-pull', 'btn-tool-cut'].forEach(id => {
+  ['btn-tool-line', 'btn-tool-rectangle', 'btn-tool-push-pull', 'btn-tool-cut', 'btn-tool-voxel-relief'].forEach(id => {
     document.getElementById(id)?.classList.remove('active');
   });
 
@@ -78,6 +89,17 @@ function setToolMode(mode) {
     viewport.classList.add('cursor-crosshair');
     document.getElementById('btn-tool-cut')?.classList.add('active');
     showToast('Cut Tool — click two points to slice meshes');
+  } else if (mode === 'voxel-relief') {
+    scene.transformControls.detach();
+    const target = scene.selectedObjects.length === 1 && scene.selectedObjects[0].userData.voxelized
+      ? scene.selectedObjects[0]
+      : null;
+    voxelReliefTool.activate(target);
+    voxelReliefTool.setSelectionMode(propsPanel.reliefSelectionMode);
+    viewport.classList.add('cursor-voxel-relief');
+    document.getElementById('btn-tool-voxel-relief')?.classList.add('active');
+    scene.orbit.enabled = true;
+    showToast(`Voxel Relief (${reliefModeLabel(propsPanel.reliefSelectionMode)}) — selecciona y usa Extract/Subtract`);
   } else {
     // transform mode — re-attach gizmo to whatever is selected
     scene._updateTransformControls();
@@ -155,6 +177,9 @@ cutTool.onCutComplete = (results) => {
 scene.onSelectionChanged = (selection) => {
   if (selection.length === 1) {
     propsPanel.showProperties(selection[0]);
+    if (toolMode === 'voxel-relief') {
+      voxelReliefTool.setTargetMesh(selection[0].userData.voxelized ? selection[0] : null);
+    }
   } else if (selection.length > 1) {
     propsPanel.showProperties({ name: `${selection.length} objects selected`, isMulti: true });
   } else {
@@ -184,6 +209,80 @@ assetPanel.onAssetSelected = (asset) => {
 // Duplicate/delete from properties panel
 propsPanel.onDuplicate = (mesh) => duplicateSelected();
 propsPanel.onDelete = (mesh) => deleteSelected();
+
+propsPanel.onReliefExtract = (mesh) => {
+  const prev = cloneVoxelState(mesh);
+  voxelReliefTool.setTargetMesh(mesh);
+  const result = voxelReliefTool.applyExtract(mesh);
+  if (!result) {
+    showToast('Select pixels with the magic wand first');
+    return;
+  }
+  voxelReliefTool.updateSelectionOverlay(mesh);
+  history.push({
+    label: 'Voxel Extract',
+    undo: () => {
+      restoreVoxelState(mesh, prev);
+      QuadFactory.rebuildVoxelGeometry(mesh);
+      voxelReliefTool.updateSelectionOverlay(mesh);
+      propsPanel.updateReliefSelectionCount(countMask(mesh.userData.voxelSelection || []));
+    },
+    redo: () => {
+      QuadFactory.applyVoxelDepthDelta(mesh, result.delta, voxelReliefTool.maxDepth);
+      voxelReliefTool.updateSelectionOverlay(mesh);
+    },
+  });
+  showToast(`Extracted +${result.delta} depth layer${Math.abs(result.delta) !== 1 ? 's' : ''}`);
+};
+
+propsPanel.onReliefSubtract = (mesh) => {
+  const prev = cloneVoxelState(mesh);
+  voxelReliefTool.setTargetMesh(mesh);
+  const result = voxelReliefTool.applySubtract(mesh);
+  if (!result) {
+    showToast('Select pixels with the magic wand first');
+    return;
+  }
+  voxelReliefTool.updateSelectionOverlay(mesh);
+  history.push({
+    label: 'Voxel Subtract',
+    undo: () => {
+      restoreVoxelState(mesh, prev);
+      QuadFactory.rebuildVoxelGeometry(mesh);
+      voxelReliefTool.updateSelectionOverlay(mesh);
+      propsPanel.updateReliefSelectionCount(countMask(mesh.userData.voxelSelection || []));
+    },
+    redo: () => {
+      QuadFactory.applyVoxelDepthDelta(mesh, result.delta, voxelReliefTool.maxDepth);
+      voxelReliefTool.updateSelectionOverlay(mesh);
+    },
+  });
+  showToast(`Subtracted ${Math.abs(result.delta)} depth layer${Math.abs(result.delta) !== 1 ? 's' : ''}`);
+};
+
+propsPanel.onReliefClearSelection = (mesh) => {
+  voxelReliefTool.clearSelection(mesh);
+  propsPanel.updateReliefSelectionCount(0);
+};
+
+propsPanel.onReliefToleranceChanged = (value) => {
+  voxelReliefTool.setTolerance(value);
+};
+
+propsPanel.onReliefDepthStepChanged = (value) => {
+  voxelReliefTool.setDepthStep(value);
+};
+
+propsPanel.onReliefActivateTool = () => {
+  setToolMode('voxel-relief');
+};
+
+propsPanel.onReliefSelectionModeChanged = (mode) => {
+  voxelReliefTool.setSelectionMode(mode);
+  if (toolMode === 'voxel-relief') {
+    showToast(`Modo selección: ${reliefModeLabel(mode)}`);
+  }
+};
 
 // Apply texture from properties panel
 propsPanel.onApplyTexture = async (mesh) => {
@@ -247,15 +346,21 @@ canvas.addEventListener('mousemove', (e) => {
     cutTool.onMouseMove(e.clientX, e.clientY);
   } else if (toolMode === 'push-pull') {
     pushPullTool.onMouseMove(e.clientX, e.clientY);
-    // Update cursor based on whether a face is hovered
     const viewport = document.getElementById('viewport');
     viewport.classList.toggle('cursor-push-pull-active', !!pushPullTool._hoveredData);
+  } else if (toolMode === 'voxel-relief') {
+    voxelReliefTool.onMouseMove(e.clientX, e.clientY);
   }
 });
 
 canvas.addEventListener('mousedown', (e) => {
   if (toolMode === 'push-pull' && e.button === 0) {
     pushPullTool.onMouseDown(e.clientX, e.clientY);
+  } else if (toolMode === 'voxel-relief' && e.button === 0 && voxelReliefTool.selectionMode === 'area') {
+    reliefAreaDragged = false;
+    if (voxelReliefTool.onMouseDown(e.clientX, e.clientY, { shiftKey: e.shiftKey })) {
+      reliefAreaDragged = true;
+    }
   }
 });
 
@@ -269,6 +374,13 @@ canvas.addEventListener('mouseup', (e) => {
         undo: () => pushPullTool._applyExtrusion(mesh, faceNormal, materialIndex, prevDepth),
         redo: () => pushPullTool._applyExtrusion(mesh, faceNormal, materialIndex, newDepth),
       });
+    }
+  } else if (toolMode === 'voxel-relief' && e.button === 0 && voxelReliefTool.selectionMode === 'area') {
+    const result = voxelReliefTool.onMouseUp(e.clientX, e.clientY);
+    if (result) {
+      scene.selectObject(result.mesh, false);
+      propsPanel.updateReliefSelectionCount(result.selectedCount);
+      showToast(`Selected ${result.selectedCount} pixel${result.selectedCount !== 1 ? 's' : ''} (area)`);
     }
   }
 });
@@ -288,6 +400,27 @@ canvas.addEventListener('click', (e) => {
 
   if (toolMode === 'cut') {
     cutTool.onClick(e.clientX, e.clientY);
+    return;
+  }
+
+  if (toolMode === 'voxel-relief') {
+    if (voxelReliefTool.selectionMode === 'area') return;
+    if (reliefAreaDragged) {
+      reliefAreaDragged = false;
+      return;
+    }
+    const result = voxelReliefTool.onClick(e.clientX, e.clientY, {
+      shiftKey: e.shiftKey,
+      altKey: e.altKey,
+    });
+    if (result) {
+      scene.selectObject(result.mesh, false);
+      propsPanel.updateReliefSelectionCount(result.selectedCount);
+      const mode = reliefModeLabel(voxelReliefTool.selectionMode);
+      showToast(`${mode}: ${result.selectedCount} pixel${result.selectedCount !== 1 ? 's' : ''} selected`);
+    } else {
+      showToast('Click a voxelized sprite to select pixels');
+    }
     return;
   }
 
@@ -677,6 +810,8 @@ document.getElementById('btn-scale').addEventListener('click', () => setTransfor
 document.getElementById('btn-tool-line').addEventListener('click', () => setToolMode('line'));
 document.getElementById('btn-tool-rectangle').addEventListener('click', () => setToolMode('rectangle'));
 document.getElementById('btn-tool-push-pull').addEventListener('click', () => setToolMode('push-pull'));
+document.getElementById('btn-tool-cut').addEventListener('click', () => setToolMode('cut'));
+document.getElementById('btn-tool-voxel-relief').addEventListener('click', () => setToolMode('voxel-relief'));
 
 // Vertex Edit toggle
 document.getElementById('btn-vertex-edit').addEventListener('click', () => {
@@ -837,6 +972,9 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'c':
       setToolMode('cut');
+      break;
+    case 'm':
+      setToolMode('voxel-relief');
       break;
     case 'escape':
       if (toolMode !== 'transform') {
