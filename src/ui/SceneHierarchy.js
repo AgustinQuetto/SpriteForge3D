@@ -17,7 +17,7 @@ export class SceneHierarchy {
     const standalone = sm.objects.filter(obj => !obj.parent?.userData?.isSceneGroup);
 
     if (groups.length === 0 && standalone.length === 0) {
-      this.container.innerHTML = '<div class="scene-empty">No objects yet</div>';
+      this.container.innerHTML = '<div class="scene-empty">Todavía no hay objetos</div>';
       return;
     }
 
@@ -44,6 +44,10 @@ export class SceneHierarchy {
     const header = document.createElement('div');
     header.classList.add('scene-item', 'scene-group-header');
     if (isSelected) header.classList.add('selected');
+    header.setAttribute('role', 'button');
+    header.setAttribute('tabindex', '0');
+    header.setAttribute('aria-expanded', String(isExpanded));
+    header.setAttribute('aria-label', `Grupo ${group.name}`);
 
     header.innerHTML = `
       <span class="material-symbols-rounded scene-expand-icon">${isExpanded ? 'expand_more' : 'chevron_right'}</span>
@@ -73,6 +77,12 @@ export class SceneHierarchy {
       if (this.onSelect) this.onSelect(group);
       this.refresh();
     });
+    header.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        header.click();
+      }
+    });
 
     wrapper.appendChild(header);
 
@@ -101,8 +111,20 @@ export class SceneHierarchy {
     item.classList.add('scene-item');
     if (indented) item.classList.add('scene-child-item');
     if (isSelected) item.classList.add('selected');
+    item.setAttribute('role', 'button');
+    item.setAttribute('tabindex', '0');
+    item.setAttribute('aria-selected', String(isSelected));
+    item.setAttribute('aria-label', `Seleccionar ${obj.name || 'objeto sin nombre'}`);
 
-    const iconMap = { box: 'deployed_code', quad: 'image', polygon: 'pentagon', cylinder: 'circle', plane: 'rectangle' };
+    const iconMap = {
+      box: 'deployed_code',
+      'voxel-json': 'deployed_code',
+      voxel: 'view_in_ar',
+      quad: 'image',
+      polygon: 'pentagon',
+      cylinder: 'circle',
+      plane: 'rectangle',
+    };
     const icon = iconMap[obj.userData.type] || 'rectangle';
 
     item.innerHTML = `
@@ -123,6 +145,12 @@ export class SceneHierarchy {
       sm.selectObject(obj, additive);
       if (this.onSelect) this.onSelect(obj);
       this.refresh();
+    });
+    item.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        item.click();
+      }
     });
 
     return item;

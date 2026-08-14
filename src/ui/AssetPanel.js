@@ -10,6 +10,7 @@ export class AssetPanel {
     this.selectedAssets = [];
     this.onAssetSelected = null; // callback(asset)
     this.onAssetDragStart = null;
+    this.onAssetsImported = null;
 
     this.dropZone = document.getElementById('drop-zone');
     this.fileInput = document.getElementById('file-input');
@@ -39,6 +40,12 @@ export class AssetPanel {
   _initDragDrop() {
     // Click to browse
     this.dropZone.addEventListener('click', () => this.fileInput.click());
+    this.dropZone.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        this.fileInput.click();
+      }
+    });
 
     this.fileInput.addEventListener('change', (e) => {
       this._handleFiles(e.target.files);
@@ -90,6 +97,8 @@ export class AssetPanel {
       e.preventDefault();
       const imported = await this._importFiles(imageFiles, { autoSelect: true });
       if (imported.length === 0) return;
+
+      if (this.onAssetsImported) this.onAssetsImported(imported);
 
       const label = imported.length === 1
         ? `Pasted "${imported[0].name}"`
@@ -155,8 +164,11 @@ export class AssetPanel {
     return imported;
   }
 
-  _handleFiles(files) {
-    this._importFiles(files, { pngOnly: true });
+  async _handleFiles(files) {
+    const imported = await this._importFiles(files, { pngOnly: true, autoSelect: true });
+    if (imported.length > 0 && this.onAssetsImported) {
+      this.onAssetsImported(imported);
+    }
   }
 
   _selectAssets(assets) {

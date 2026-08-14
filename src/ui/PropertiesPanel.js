@@ -31,7 +31,7 @@ export class PropertiesPanel {
 
   showEmpty() {
     this.currentMesh = null;
-    this.body.innerHTML = '<div class="prop-empty">Select an object</div>';
+    this.body.innerHTML = '<div class="prop-empty"><strong>Sin selección</strong><span>Elegí un objeto en la escena para editarlo.</span></div>';
   }
 
   showProperties(mesh) {
@@ -59,12 +59,14 @@ export class PropertiesPanel {
 
     this.body.innerHTML = `
       <div class="prop-section">
-        <div class="prop-section-title">Name</div>
+        <div class="prop-section-title">Nombre</div>
         <input type="text" class="prop-input" id="prop-name" value="${mesh.name}" style="width:100%;margin-bottom:8px">
       </div>
 
-      <div class="prop-section">
-        <div class="prop-section-title">Position</div>
+      <details class="properties-advanced">
+        <summary>Posición, rotación y escala</summary>
+        <div class="prop-section">
+        <div class="prop-section-title">Posición</div>
         <div class="prop-row">
           <span class="prop-label x">X</span>
           <input type="number" step="0.1" class="prop-input" id="prop-px" value="${pos.x.toFixed(3)}">
@@ -79,8 +81,8 @@ export class PropertiesPanel {
         </div>
       </div>
 
-      <div class="prop-section">
-        <div class="prop-section-title">Rotation (°)</div>
+        <div class="prop-section">
+        <div class="prop-section-title">Rotación (°)</div>
         <div class="prop-row">
           <span class="prop-label x">X</span>
           <input type="number" step="5" class="prop-input" id="prop-rx" value="${(rot.x * 180 / Math.PI).toFixed(1)}">
@@ -95,8 +97,8 @@ export class PropertiesPanel {
         </div>
       </div>
 
-      <div class="prop-section">
-        <div class="prop-section-title">Scale</div>
+        <div class="prop-section">
+        <div class="prop-section-title">Escala</div>
         <div class="prop-row">
           <span class="prop-label x">X</span>
           <input type="number" step="0.1" class="prop-input" id="prop-sx" value="${scl.x.toFixed(3)}">
@@ -109,33 +111,34 @@ export class PropertiesPanel {
           <span class="prop-label z">Z</span>
           <input type="number" step="0.1" class="prop-input" id="prop-sz" value="${scl.z.toFixed(3)}">
         </div>
-      </div>
+        </div>
+      </details>
 
       ${showExtrusion ? `
       <div class="prop-section">
-        <div class="prop-section-title">Extrusion (Thickness / Grosor)</div>
+        <div class="prop-section-title">Volumen</div>
         <div class="prop-slider-row">
-          <span class="prop-slider-label">Depth</span>
+          <span class="prop-slider-label">Grosor</span>
           <input type="range" class="prop-slider" id="prop-extrude" min="0" max="128" step="1" value="${depth}">
           <input type="number" class="prop-input" id="prop-extrude-num" min="0" max="512" step="1" value="${depth.toFixed(1)}" style="width:60px;margin-left:8px">
         </div>
         <div class="prop-row" style="margin-top:8px">
           <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text-secondary)">
             <input type="checkbox" id="prop-texture-sides" ${mesh.userData.textureSides !== false ? 'checked' : ''}>
-            Pattern on side faces (Patrón)
+            Repetir textura en los laterales
           </label>
         </div>
         <div class="prop-row" style="margin-top:6px">
           <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text-secondary)">
             <input type="checkbox" id="prop-voxelize" ${mesh.userData.voxelized ? 'checked' : ''} ${!hasTexture ? 'disabled' : ''}>
             <span style="display:flex;flex-direction:column;gap:1px">
-              <strong style="color:var(--text);font-weight:600">Voxelize (Pixel Cubes)</strong>
-              <span style="font-size:11px">Convierte cada píxel en un cubo 3D</span>
+              <strong style="color:var(--text-primary);font-weight:600">Convertir en vóxeles</strong>
+              <span style="font-size:11px">Cada píxel se vuelve un cubo 3D</span>
             </span>
           </label>
         </div>
         <small style="color:var(--text-muted);display:block;margin-top:4px;margin-bottom:8px">
-          Extrudes flat sprites into 3D walls & tiles texture pattern seamlessly
+          Deslizá para dar profundidad al sprite.
         </small>
       </div>
       ` : ''}
@@ -227,16 +230,16 @@ export class PropertiesPanel {
       ` : ''}
 
       <div class="prop-section">
-        <div class="prop-section-title">Texture</div>
+        <div class="prop-section-title">Textura</div>
         <div style="margin-bottom:8px;text-align:center;padding:6px;background:var(--bg-input);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary)">
-          ${hasTexture ? `✓ ${mesh.userData.textureName || 'Applied'}` : 'No texture'}
+          ${hasTexture ? `✓ ${mesh.userData.textureName || 'Aplicada'}` : 'Sin textura'}
         </div>
         <button class="prop-btn prop-btn-accent" id="btn-apply-tex" style="margin-bottom:6px">
           <span class="material-symbols-rounded">texture</span>
-          Apply Selected Asset
+          Aplicar sprite seleccionado
         </button>
         <small style="color:var(--text-muted);display:block;margin-top:-2px;margin-bottom:8px">
-          Select an asset in the left panel first
+          Elegí primero un sprite del panel izquierdo.
         </small>
       </div>
 
@@ -263,14 +266,14 @@ export class PropertiesPanel {
       ` : ''}
 
       <div class="prop-section">
-        <div class="prop-section-title">Actions</div>
+        <div class="prop-section-title">Acciones</div>
         <button class="prop-btn" id="btn-duplicate" style="margin-bottom:6px">
           <span class="material-symbols-rounded">content_copy</span>
-          Duplicate (Ctrl+D)
+          Duplicar (Ctrl+D)
         </button>
         <button class="prop-btn" id="btn-delete" style="color:var(--danger)">
           <span class="material-symbols-rounded">delete</span>
-          Delete (Del)
+          Eliminar (Supr)
         </button>
       </div>
     `;

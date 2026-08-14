@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="2D to 3D visual editor — convert sprites into low-poly 3D models for 2.5D games">
-  <title>Sprite3D — 2D to 3D Editor</title>
+  <title>SpriteForge3D — Convertí sprites en modelos 3D</title>
   <link rel="stylesheet" href="/src/styles/index.css">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link
@@ -19,23 +19,26 @@
     <div class="toolbar-group toolbar-left">
       <span class="app-logo">
         <span class="material-symbols-rounded">view_in_ar</span>
-        Sprite3D
+        SpriteForge3D
       </span>
     </div>
     <div class="toolbar-group toolbar-center">
 
       <!-- Transform Tools -->
-      <button id="btn-translate" class="tool-btn active" title="Move (W)">
+      <button id="btn-translate" class="tool-btn tool-btn-labeled active" title="Mover (W)" aria-label="Mover objeto">
         <span class="material-symbols-rounded">open_with</span>
+        <span class="tool-caption">Mover</span>
       </button>
-      <button id="btn-rotate" class="tool-btn" title="Rotate (E)">
+      <button id="btn-rotate" class="tool-btn tool-btn-labeled" title="Rotar (E)" aria-label="Rotar objeto">
         <span class="material-symbols-rounded">rotate_right</span>
+        <span class="tool-caption">Rotar</span>
       </button>
-      <button id="btn-scale" class="tool-btn" title="Scale (R)">
+      <button id="btn-scale" class="tool-btn tool-btn-labeled" title="Escalar (R)" aria-label="Escalar objeto">
         <span class="material-symbols-rounded">aspect_ratio</span>
+        <span class="tool-caption">Escalar</span>
       </button>
       <div class="toolbar-divider"></div>
-      <button id="btn-vertex-edit" class="tool-btn" title="Vertex Edit Mode (V)">
+      <button id="btn-vertex-edit" class="tool-btn" title="Editar vértices (V)" aria-label="Editar vértices">
         <span class="material-symbols-rounded">polyline</span>
       </button>
 
@@ -45,22 +48,22 @@
       <div class="menu-group">
         <button class="menu-btn" id="menu-btn-add">
           <span class="material-symbols-rounded">add_box</span>
-          <span class="menu-label">Add</span>
+          <span class="menu-label">Agregar</span>
           <span class="material-symbols-rounded menu-arrow">expand_more</span>
         </button>
         <div class="dropdown" id="dropdown-add">
-          <div class="dropdown-section-label">Primitives</div>
+          <div class="dropdown-section-label">Formas básicas</div>
           <button id="btn-add-plane" class="dropdown-item">
             <span class="material-symbols-rounded">rectangle</span>
-            Plane
+            Plano
           </button>
           <button id="btn-add-cube" class="dropdown-item">
             <span class="material-symbols-rounded">deployed_code</span>
-            Cube
+            Cubo
           </button>
           <button id="btn-add-cylinder" class="dropdown-item">
             <span class="material-symbols-rounded">circle</span>
-            Cylinder
+            Cilindro
           </button>
         </div>
       </div>
@@ -71,7 +74,7 @@
       <div class="menu-group">
         <button class="menu-btn" id="menu-btn-draw">
           <span class="material-symbols-rounded">edit</span>
-          <span class="menu-label">Draw</span>
+          <span class="menu-label">Dibujar</span>
           <span class="material-symbols-rounded menu-arrow">expand_more</span>
         </button>
         <div class="dropdown" id="dropdown-draw">
@@ -113,7 +116,7 @@
       <div class="menu-group">
         <button class="menu-btn" id="menu-btn-view">
           <span class="material-symbols-rounded">visibility</span>
-          <span class="menu-label">View</span>
+          <span class="menu-label">Vista</span>
           <span class="material-symbols-rounded menu-arrow">expand_more</span>
         </button>
         <div class="dropdown" id="dropdown-view">
@@ -126,6 +129,10 @@
             <span class="material-symbols-rounded">grid_guides</span>
             Snap to Grid
             <span class="dropdown-shortcut">G</span>
+          </button>
+          <button id="btn-snap-asset" class="dropdown-item">
+            <span class="material-symbols-rounded">join</span>
+            Snap to Asset
           </button>
           <div class="dropdown-row">
             <span>Grid Size</span>
@@ -151,10 +158,10 @@
       <div class="toolbar-divider"></div>
 
       <!-- History -->
-      <button id="btn-undo" class="tool-btn" title="Undo (Ctrl+Z)">
+      <button id="btn-undo" class="tool-btn" title="Deshacer (Ctrl+Z)" aria-label="Deshacer">
         <span class="material-symbols-rounded">undo</span>
       </button>
-      <button id="btn-redo" class="tool-btn" title="Redo (Ctrl+Shift+Z)">
+      <button id="btn-redo" class="tool-btn" title="Rehacer (Ctrl+Shift+Z)" aria-label="Rehacer">
         <span class="material-symbols-rounded">redo</span>
       </button>
 
@@ -165,23 +172,29 @@
       <div class="menu-group">
         <button class="menu-btn menu-btn-success" id="menu-btn-project">
           <span class="material-symbols-rounded">folder</span>
-          <span class="menu-label">Project</span>
+          <span class="menu-label">Proyecto</span>
           <span class="material-symbols-rounded menu-arrow">expand_more</span>
         </button>
         <div class="dropdown dropdown-right" id="dropdown-project">
           <button id="btn-save-project" class="dropdown-item dropdown-item-success">
             <span class="material-symbols-rounded">save</span>
-            Save Project
+            Guardar proyecto
             <span class="dropdown-shortcut">.s3d</span>
           </button>
           <button id="btn-load-project" class="dropdown-item">
             <span class="material-symbols-rounded">folder_open</span>
-            Load Project
+            Abrir proyecto
             <span class="dropdown-shortcut">.s3d</span>
+          </button>
+          <button id="btn-import-voxels" class="dropdown-item">
+            <span class="material-symbols-rounded">deployed_code</span>
+            Importar vóxeles
+            <span class="dropdown-shortcut">.json</span>
           </button>
         </div>
       </div>
       <input type="file" id="file-load-project" accept=".s3d" hidden>
+      <input type="file" id="file-import-voxels" accept=".json,application/json" hidden>
 
       <div class="toolbar-divider"></div>
 
@@ -189,7 +202,7 @@
       <div class="menu-group">
         <button class="menu-btn menu-btn-accent" id="menu-btn-export">
           <span class="material-symbols-rounded">download</span>
-          <span class="menu-label">Export</span>
+          <span class="menu-label">Exportar</span>
           <span class="material-symbols-rounded menu-arrow">expand_more</span>
         </button>
         <div class="dropdown dropdown-right" id="dropdown-export">
@@ -220,13 +233,13 @@
       <div class="panel" id="assets-panel">
         <div class="panel-header">
           <span class="material-symbols-rounded">image</span>
-          Assets
+          Sprites
         </div>
         <div class="panel-body">
-          <div id="drop-zone" class="drop-zone">
+          <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="Importar sprites PNG">
             <span class="material-symbols-rounded drop-icon">cloud_upload</span>
-            <p>Drop or paste PNGs here</p>
-            <small>or click to browse · Ctrl+V</small>
+            <p>Importá tu sprite</p>
+            <small>PNG · arrastrá, pegá o hacé clic</small>
             <input type="file" id="file-input" accept="image/png" multiple hidden>
           </div>
 
@@ -262,11 +275,11 @@
       <div class="panel" id="hierarchy-panel">
         <div class="panel-header">
           <span class="material-symbols-rounded">account_tree</span>
-          Scene
+          Objetos
         </div>
         <div class="panel-body">
           <div id="scene-tree" class="scene-tree">
-            <div class="scene-empty">No objects yet</div>
+            <div class="scene-empty">Todavía no hay objetos</div>
           </div>
         </div>
       </div>
@@ -275,6 +288,44 @@
     <!-- 3D Canvas -->
     <div id="canvas-container">
       <canvas id="viewport"></canvas>
+      <nav id="workflow-guide" class="workflow-guide" aria-label="Progreso del flujo">
+        <div class="workflow-step active" data-step="import">
+          <span class="workflow-number">1</span>
+          <span><strong>Importar</strong><small>PNG o JSON</small></span>
+        </div>
+        <span class="workflow-line"></span>
+        <div class="workflow-step" data-step="edit">
+          <span class="workflow-number">2</span>
+          <span><strong>Dar volumen</strong><small>Ajustá el resultado</small></span>
+        </div>
+        <span class="workflow-line"></span>
+        <div class="workflow-step" data-step="export">
+          <span class="workflow-number">3</span>
+          <span><strong>Exportar</strong><small>Elegí el formato</small></span>
+        </div>
+      </nav>
+      <section id="welcome-card" class="welcome-card" aria-labelledby="welcome-title">
+        <span class="material-symbols-rounded welcome-icon">deployed_code</span>
+        <p class="welcome-eyebrow">TU PRIMER MODELO 3D</p>
+        <h1 id="welcome-title">Empezá con una imagen</h1>
+        <p>Importá un PNG y lo ubicamos automáticamente en la escena. Después solo ajustás el volumen y exportás.</p>
+        <div class="welcome-actions">
+          <button id="btn-quick-import" class="welcome-primary">
+            <span class="material-symbols-rounded">add_photo_alternate</span>
+            Elegir sprite PNG
+          </button>
+          <button id="btn-quick-voxel" class="welcome-secondary">
+            <span class="material-symbols-rounded">data_object</span>
+            Importar JSON voxel
+          </button>
+        </div>
+        <button id="btn-quick-demo" class="welcome-demo">O probá el editor con un cubo</button>
+        <small>También podés arrastrar archivos PNG o JSON directamente acá.</small>
+      </section>
+      <div id="context-hint" class="context-hint" aria-live="polite">
+        <span class="material-symbols-rounded">lightbulb</span>
+        <span id="context-hint-text">Importá un sprite para empezar.</span>
+      </div>
       <div id="viewport-info">
         <span id="info-camera">Perspective</span>
         <span id="info-objects">0 objects</span>
@@ -286,10 +337,10 @@
       <div class="panel" id="properties-panel">
         <div class="panel-header">
           <span class="material-symbols-rounded">tune</span>
-          Properties
+          Ajustes
         </div>
         <div class="panel-body" id="properties-body">
-          <div class="prop-empty">Select an object</div>
+          <div class="prop-empty"><strong>Sin selección</strong><span>Elegí un objeto en la escena para editarlo.</span></div>
         </div>
       </div>
     </aside>

@@ -15,6 +15,7 @@ import { PushPullTool } from './editor/PushPullTool.js';
 import { CutTool } from './editor/CutTool.js';
 import { VoxelReliefTool } from './editor/VoxelReliefTool.js';
 import { cloneVoxelState, restoreVoxelState, countMask, loadImageFromFile } from './editor/PixelUtils.js';
+import { createVoxelMesh } from './import/VoxelJSONLoader.js';
 
 // ──────────────────────────────────────────────
 //  Initialize Systems
@@ -186,6 +187,7 @@ scene.onSelectionChanged = (selection) => {
     propsPanel.showEmpty();
   }
   hierarchy.refresh();
+  updateBeginnerGuide();
 };
 
 // When transform gizmo moves an object → update property inputs
@@ -204,6 +206,23 @@ scene.onVertexChanged = (controlPoint) => {
 // When user clicks an asset thumbnail → just highlights it
 assetPanel.onAssetSelected = (asset) => {
   // Selected asset will be used when clicking on the canvas
+};
+
+// Importing from the beginner entry point is intentionally one-step: once a
+// PNG is loaded, place it in the center and make it ready to edit.
+assetPanel.onAssetsImported = (assets) => {
+  const rect = canvas.getBoundingClientRect();
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+
+  if (assets.length === 1) {
+    placeAsset(assets[0], centerX, centerY);
+  } else {
+    placeAssetsGrid(assets, centerX, centerY);
+  }
+
+  assetPanel.clearSelection();
+  updateBeginnerGuide();
 };
 
 // Duplicate/delete from properties panel
@@ -643,7 +662,23 @@ canvasContainer.addEventListener('drop', (e) => {
 
 canvasContainer.addEventListener('drop', async (e) => {
   if (e.dataTransfer.files.length > 0) {
-    const files = [...e.dataTransfer.files].filter(f => f.type === 'image/png');
+    const droppedFiles = [...e.dataTransfer.files];
+    const voxelFiles = droppedFiles.filter(file =>
+      file.type === 'application/json' || file.name.toLowerCase().endsWith('.json')
+    );
+    const files = droppedFiles.filter(f => f.type === 'image/png');
+
+    if (voxelFiles.length > 0) {
+      const worldPos = scene.getWorldPositionFromScreen(e.clientX, e.clientY);
+      let offsetX = 0;
+      for (const file of voxelFiles) {
+        const mesh = await importVoxelFile(file, worldPos
+          ? { x: worldPos.x + offsetX, y: 0, z: worldPos.z }
+          : null);
+        if (mesh) offsetX += mesh.userData.originalWidth + 1;
+      }
+    }
+
     if (files.length === 0) return;
 
     const loadedAssets = await Promise.all(files.map(file => {
@@ -682,6 +717,11 @@ canvasContainer.addEventListener('drop', async (e) => {
 //  Place Asset
 // ──────────────────────────────────────────────
 
+function snapPlacedMesh(mesh) {
+  if (scene.snapEnabled) scene.snapObjectToGrid(mesh);
+  if (scene.assetSnapEnabled) scene.snapObjectToAssets(mesh);
+}
+
 function placeAsset(asset, clientX, clientY) {
   // Clone the texture so each quad has its own material
   const tex = asset.texture.clone();
@@ -696,13 +736,10 @@ function placeAsset(asset, clientX, clientY) {
   const worldPos = scene.getWorldPositionFromScreen(clientX, clientY);
   if (worldPos) {
     mesh.position.set(worldPos.x, 0, worldPos.z);
-
-    if (scene.snapEnabled) {
-      scene.snapObjectToGrid(mesh);
-    }
   }
 
   scene.addObject(mesh);
+  if (worldPos) snapPlacedMesh(mesh);
   scene.selectObject(mesh, false);
   hierarchy.refresh();
 
@@ -755,11 +792,8 @@ function placeAssetsGrid(assets, clientX, clientY) {
 
     mesh.position.set(startX + c * spacing, 0, startZ + r * spacing);
 
-    if (scene.snapEnabled) {
-      scene.snapObjectToGrid(mesh);
-    }
-
     scene.addObject(mesh);
+    snapPlacedMesh(mesh);
     createdMeshes.push(mesh);
   });
 
@@ -798,11 +832,8 @@ function placePrimitive(type) {
   // Place it slightly in front of the camera focus or at origin
   mesh.position.set(0, 0, 0);
 
-  if (scene.snapEnabled) {
-    scene.snapObjectToGrid(mesh);
-  }
-
   scene.addObject(mesh);
+  snapPlacedMesh(mesh);
   scene.selectObject(mesh);
   hierarchy.refresh();
 
@@ -1000,7 +1031,15 @@ document.getElementById('btn-snap').addEventListener('click', () => {
   snapOn = !snapOn;
   scene.setSnap(snapOn);
   document.getElementById('btn-snap').classList.toggle('active', snapOn);
-  showToast(snapOn ? 'Snap ON' : 'Snap OFF');
+  showToast(snapOn ? 'Snap to Grid ON' : 'Snap to Grid OFF');
+});
+
+let assetSnapOn = false;
+document.getElementById('btn-snap-asset').addEventListener('click', () => {
+  assetSnapOn = !assetSnapOn;
+  scene.setAssetSnap(assetSnapOn);
+  document.getElementById('btn-snap-asset').classList.toggle('active', assetSnapOn);
+  showToast(assetSnapOn ? 'Snap to Asset ON' : 'Snap to Asset OFF');
 });
 
 // Grid toggle
@@ -1205,7 +1244,12 @@ async function saveProject() {
         rotation: [rot.x, rot.y, rot.z],
         scale: [scl.x, scl.y, scl.z],
         uvRepeat: obj.userData.uvRepeat || [1, 1],
-        uvOffset: obj.userData.uvOffset || [0, 0]
+        uvOffset: obj.userData.uvOffset || [0, 0],
+        voxelSource: obj.userData.voxelSource || null,
+        voxelSize: obj.userData.voxelSize || 1,
+        voxelColor: obj.userData.type === 'voxel-json' && obj.material?.color
+          ? obj.material.color.getHex()
+          : null,
       };
     })
   };
@@ -1309,7 +1353,12 @@ function reconstructObjects(objectDataList) {
       }
     }
 
-    if (data.type === 'plane') mesh = QuadFactory.createPlane(data.originalWidth, data.originalHeight);
+    if (data.type === 'voxel-json' && data.voxelSource) {
+      mesh = createVoxelMesh(data.voxelSource, {
+        voxelSize: data.voxelSize || 1,
+        color: data.voxelColor ?? 0x8fb3d9,
+      });
+    } else if (data.type === 'plane') mesh = QuadFactory.createPlane(data.originalWidth, data.originalHeight);
     else if (data.type === 'cube') mesh = QuadFactory.createCube(data.originalWidth, data.originalHeight, data.extrusionDepth);
     else if (data.type === 'cylinder') mesh = QuadFactory.createCylinder(data.originalWidth / 2, data.originalHeight);
     else if (data.type === 'quad' || data.type === 'box') {
@@ -1371,6 +1420,47 @@ document.getElementById('file-load-project').addEventListener('change', (e) => {
     loadProject(e.target.files[0]);
     e.target.value = ''; // reset
   }
+});
+
+async function importVoxelFile(file, position = null) {
+  try {
+    const mesh = createVoxelMesh(await file.text());
+    if (position) mesh.position.set(position.x, position.y, position.z);
+
+    scene.addObject(mesh);
+    scene.selectObject(mesh, false);
+    hierarchy.refresh();
+
+    history.push({
+      label: `Import ${mesh.name}`,
+      undo: () => {
+        scene.removeObject(mesh);
+        hierarchy.refresh();
+      },
+      redo: () => {
+        scene.addObject(mesh);
+        scene.selectObject(mesh, false);
+        hierarchy.refresh();
+      },
+    });
+
+    showToast(`Imported "${mesh.name}" (${mesh.userData.voxelCount} voxels)`);
+    return mesh;
+  } catch (err) {
+    console.error(err);
+    showToast(`Could not import voxels: ${err.message}`);
+    return null;
+  }
+}
+
+document.getElementById('btn-import-voxels').addEventListener('click', () => {
+  document.getElementById('file-import-voxels').click();
+});
+
+document.getElementById('file-import-voxels').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (file) await importVoxelFile(file);
+  e.target.value = '';
 });
 
 // ──────────────────────────────────────────────
@@ -1537,8 +1627,75 @@ function animate() {
 
 animate();
 
+// Beginner guidance and zero-friction entry points
+const welcomeCard = document.getElementById('welcome-card');
+const contextHintText = document.getElementById('context-hint-text');
+const exportMenuButton = document.getElementById('menu-btn-export');
+const workflowSteps = {
+  import: document.querySelector('[data-step="import"]'),
+  edit: document.querySelector('[data-step="edit"]'),
+  export: document.querySelector('[data-step="export"]'),
+};
+
+function setWorkflowState(activeStep, completedSteps = []) {
+  Object.entries(workflowSteps).forEach(([name, element]) => {
+    if (!element) return;
+    element.classList.toggle('active', name === activeStep);
+    element.classList.toggle('complete', completedSteps.includes(name));
+    const number = element.querySelector('.workflow-number');
+    if (number) number.textContent = completedSteps.includes(name) ? '✓' : String(['import', 'edit', 'export'].indexOf(name) + 1);
+  });
+}
+
+function updateBeginnerGuide() {
+  const objectCount = scene.exportGroup.children.length;
+  const hasObjects = objectCount > 0;
+  const hasSelection = scene.selectedObjects.length > 0;
+
+  welcomeCard?.classList.toggle('is-hidden', hasObjects);
+  welcomeCard?.setAttribute('aria-hidden', String(hasObjects));
+  if (exportMenuButton) {
+    exportMenuButton.disabled = !hasObjects;
+    exportMenuButton.title = hasObjects ? 'Exportar modelo' : 'Primero importá o creá un objeto';
+  }
+
+  if (!hasObjects) {
+    setWorkflowState('import');
+    if (contextHintText) contextHintText.textContent = 'Importá un sprite para empezar.';
+  } else if (hasSelection) {
+    setWorkflowState('edit', ['import']);
+    if (contextHintText) contextHintText.textContent = 'Usá Volumen para dar profundidad. Los ajustes técnicos están plegados.';
+  } else {
+    setWorkflowState('edit', ['import']);
+    if (contextHintText) contextHintText.textContent = 'Seleccioná un objeto para continuar editándolo.';
+  }
+}
+
+document.getElementById('btn-quick-import')?.addEventListener('click', () => {
+  document.getElementById('file-input')?.click();
+});
+
+document.getElementById('btn-quick-voxel')?.addEventListener('click', () => {
+  document.getElementById('file-import-voxels')?.click();
+});
+
+document.getElementById('btn-quick-demo')?.addEventListener('click', () => {
+  placePrimitive('cube');
+  updateBeginnerGuide();
+});
+
+exportMenuButton?.addEventListener('click', () => {
+  if (scene.exportGroup.children.length === 0) return;
+  setWorkflowState('export', ['import', 'edit']);
+  if (contextHintText) contextHintText.textContent = 'Elegí GLTF para uso general, OBJ para compatibilidad o Godot GridMap.';
+});
+
+const sceneTreeObserver = new MutationObserver(updateBeginnerGuide);
+sceneTreeObserver.observe(document.getElementById('scene-tree'), { childList: true, subtree: true });
+
 // Initial UI state
-showToast('Sprite3D ready — drop or paste PNG files to begin');
+updateBeginnerGuide();
+showToast('Todo listo: importá un PNG y lo ubicamos por vos.');
 
 // ── Dropdown Menu System ──────────────────────────────────────────────────────
 const menuGroups = document.querySelectorAll('.menu-group');

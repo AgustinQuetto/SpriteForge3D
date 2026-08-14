@@ -1,0 +1,11 @@
+{
+  "format": "voxel-binary-sparse-v1",
+  "name": "farol_3d",
+  "dimensions": { "y": 384, "x": 96, "z": 96 },
+  "order": ["y", "x", "z"],
+  "filledVoxels": [
+    [0, 48, 48],
+    [1, 48, 48],
+    [2, 47, 48]
+  ]
+}

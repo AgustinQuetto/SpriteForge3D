@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
+import { applyAssetSnap } from '../editor/AssetSnap.js';
 
 export class SceneManager {
   constructor(canvas) {
@@ -10,6 +11,7 @@ export class SceneManager {
     this.selectedObjects = []; // Array of selected meshes/groups
     this.gridVisible = true;
     this.snapEnabled = false;
+    this.assetSnapEnabled = false;
     this.snapSize = 32.0;
     this.cameraMode = 'perspective';
 
@@ -97,15 +99,21 @@ export class SceneManager {
     });
 
     this.transformControls.addEventListener('objectChange', () => {
-      if (this.snapEnabled && this.transformControls.mode === 'translate') {
+      if (this.transformControls.mode === 'translate') {
         const obj = this.transformControls.object;
         if (obj) {
-          if (obj === this.tempSelectionGroup) {
-            obj.position.x = Math.round(obj.position.x / this.snapSize) * this.snapSize;
-            obj.position.y = Math.round(obj.position.y / this.snapSize) * this.snapSize;
-            obj.position.z = Math.round(obj.position.z / this.snapSize) * this.snapSize;
-          } else {
-            this.snapObjectToGrid(obj);
+          if (this.snapEnabled) {
+            if (obj === this.tempSelectionGroup) {
+              obj.position.x = Math.round(obj.position.x / this.snapSize) * this.snapSize;
+              obj.position.y = Math.round(obj.position.y / this.snapSize) * this.snapSize;
+              obj.position.z = Math.round(obj.position.z / this.snapSize) * this.snapSize;
+            } else {
+              this.snapObjectToGrid(obj);
+            }
+          }
+
+          if (this.assetSnapEnabled) {
+            this.snapObjectToAssets(obj);
           }
         }
       }
@@ -272,6 +280,36 @@ export class SceneManager {
       this.transformControls.setTranslationSnap(null);
       this.transformControls.setRotationSnap(null);
     }
+  }
+
+  setAssetSnap(enabled) {
+    this.assetSnapEnabled = enabled;
+  }
+
+  getAssetSnapThreshold() {
+    return Math.max(8, this.snapSize * 0.75);
+  }
+
+  /**
+   * Snap a mesh (or selection group) to nearby asset edges/corners.
+   */
+  snapObjectToAssets(obj) {
+    if (!obj) return false;
+
+    const threshold = this.getAssetSnapThreshold();
+    let movingMeshes = [];
+    let staticMeshes = [];
+
+    if (obj === this.tempSelectionGroup) {
+      movingMeshes = [...obj.children];
+      staticMeshes = this.objects.filter(mesh => !movingMeshes.includes(mesh));
+    } else {
+      movingMeshes = [obj];
+      staticMeshes = this.objects.filter(mesh => mesh !== obj);
+    }
+
+    if (!movingMeshes.length || !staticMeshes.length) return false;
+    return applyAssetSnap(movingMeshes, staticMeshes, threshold, obj);
   }
 
   toggleGrid() {
