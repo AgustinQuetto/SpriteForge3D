@@ -5,9 +5,12 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "spriteforge": "node scripts/spriteforge-cli.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
+    "pngjs": "^7.0.0",
     "three": "^0.170.0",
     "xatlas-three": "^0.2.1",
     "xatlasjs": "^0.2.0"
