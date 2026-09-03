@@ -88,4 +88,30 @@ export class VertexEditor {
      mesh.geometry.computeBoundingBox();
      mesh.geometry.computeBoundingSphere();
   }
+
+  captureGeometryState(mesh = this.activeMesh) {
+    if (!mesh?.geometry?.attributes?.position) return null;
+    const positions = new Float32Array(mesh.geometry.attributes.position.array);
+    const normals = mesh.geometry.attributes.normal
+      ? new Float32Array(mesh.geometry.attributes.normal.array)
+      : null;
+    return { mesh, positions, normals };
+  }
+
+  restoreGeometryState(state) {
+    const mesh = state?.mesh;
+    if (!mesh?.geometry?.attributes?.position || !state.positions) return;
+    const position = mesh.geometry.attributes.position;
+    position.array.set(state.positions);
+    position.needsUpdate = true;
+    if (state.normals && mesh.geometry.attributes.normal
+        && mesh.geometry.attributes.normal.array.length === state.normals.length) {
+      mesh.geometry.attributes.normal.array.set(state.normals);
+      mesh.geometry.attributes.normal.needsUpdate = true;
+    } else {
+      mesh.geometry.computeVertexNormals();
+    }
+    mesh.geometry.computeBoundingBox();
+    mesh.geometry.computeBoundingSphere();
+  }
 }

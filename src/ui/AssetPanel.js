@@ -6,15 +6,21 @@ import * as THREE from 'three';
 export class AssetPanel {
   constructor() {
     this.assets = []; // { name, texture, image, dataUrl }
+    this.modelAssets = []; // { name, format, sourceBase64 }
     this.selectedAsset = null;
+    this.selectedModelAsset = null;
     this.selectedAssets = [];
     this.onAssetSelected = null; // callback(asset)
+    this.onModelSelected = null; // callback(modelAsset)
     this.onAssetDragStart = null;
     this.onAssetsImported = null;
+    this.onModelFilesImported = null;
+    this.onAssetsChanged = null;
 
     this.dropZone = document.getElementById('drop-zone');
     this.fileInput = document.getElementById('file-input');
     this.assetGrid = document.getElementById('asset-grid');
+    this.modelAssetGrid = document.getElementById('model-asset-grid');
 
     this.slicerControls = document.getElementById('slicer-controls');
     this.slicerTargetName = document.getElementById('slicer-target-name');
@@ -66,7 +72,14 @@ export class AssetPanel {
       e.preventDefault();
       this.dropZone.classList.remove('drag-over');
       const files = [...e.dataTransfer.files].filter(f => f.type === 'image/png');
+      const modelFiles = [...e.dataTransfer.files].filter(file => {
+        const extension = file.name.split('.').pop()?.toLowerCase();
+        return ['obj', 'gltf', 'glb', 'stl', 'ply', 'fbx', 'dae', 'dwg', 'dxf'].includes(extension);
+      });
       this._handleFiles(files);
+      if (modelFiles.length > 0 && this.onModelFilesImported) {
+        this.onModelFilesImported(modelFiles);
+      }
     });
   }
 
@@ -136,6 +149,7 @@ export class AssetPanel {
           const asset = { name, texture, image: img, dataUrl };
           this.assets.push(asset);
           this._addThumbnail(asset);
+          if (this.onAssetsChanged) this.onAssetsChanged(this.assets);
           resolve(asset);
         };
         img.onerror = () => resolve(null);
@@ -257,6 +271,77 @@ export class AssetPanel {
     this.assetGrid.appendChild(thumb);
   }
 
+  _addModelThumbnail(modelAsset) {
+    if (!this.modelAssetGrid) return;
+
+    const thumb = document.createElement('div');
+    thumb.classList.add('asset-thumb', 'model-asset-thumb');
+    thumb.title = `${modelAsset.name} · ${modelAsset.format.toUpperCase()}`;
+    thumb.draggable = true;
+    thumb._modelAsset = modelAsset;
+
+    const icon = document.createElement('span');
+    icon.className = 'material-symbols-rounded model-asset-icon';
+    icon.textContent = 'view_in_ar';
+    thumb.appendChild(icon);
+
+    const format = document.createElement('span');
+    format.className = 'model-asset-format';
+    format.textContent = modelAsset.format.toUpperCase();
+    thumb.appendChild(format);
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'asset-name';
+    nameEl.textContent = modelAsset.name;
+    thumb.appendChild(nameEl);
+
+    thumb.addEventListener('click', () => {
+      this.modelAssetGrid.querySelectorAll('.model-asset-thumb').forEach(item =>
+        item.classList.remove('selected')
+      );
+      thumb.classList.add('selected');
+      this.selectedModelAsset = modelAsset;
+      if (this.onModelSelected) this.onModelSelected(modelAsset);
+    });
+
+    thumb.addEventListener('dragstart', (e) => {
+      const index = this.modelAssets.indexOf(modelAsset);
+      e.dataTransfer.setData('application/x-spriteforge-model', index.toString());
+      e.dataTransfer.effectAllowed = 'copy';
+      if (this.onModelDragStart) this.onModelDragStart(modelAsset);
+    });
+
+    this.modelAssetGrid.appendChild(thumb);
+  }
+
+  addModelAsset(modelAsset) {
+    if (!modelAsset?.sourceBase64 || !modelAsset.name) return null;
+    const existing = this.modelAssets.find(asset =>
+      asset.name === modelAsset.name && asset.sourceBase64 === modelAsset.sourceBase64
+    );
+    if (existing) return existing;
+
+    const asset = {
+      name: modelAsset.name,
+      format: modelAsset.format || modelAsset.name.split('.').pop() || '3d',
+      sourceBase64: modelAsset.sourceBase64,
+    };
+    this.modelAssets.push(asset);
+    this._addModelThumbnail(asset);
+    if (this.onAssetsChanged) this.onAssetsChanged(this.assets, this.modelAssets);
+    return asset;
+  }
+
+  getModelAssetByIndex(index) {
+    return this.modelAssets[index] || null;
+  }
+
+  clearModelAssets() {
+    this.modelAssets = [];
+    this.selectedModelAsset = null;
+    if (this.modelAssetGrid) this.modelAssetGrid.innerHTML = '';
+  }
+
   getAssetByIndex(idx) {
     return this.assets[idx] || null;
   }
@@ -264,7 +349,11 @@ export class AssetPanel {
   clearSelection() {
     this.selectedAsset = null;
     this.selectedAssets = [];
+    this.selectedModelAsset = null;
     this.assetGrid.querySelectorAll('.asset-thumb').forEach(t =>
+      t.classList.remove('selected')
+    );
+    this.modelAssetGrid?.querySelectorAll('.model-asset-thumb').forEach(t =>
       t.classList.remove('selected')
     );
     if (this.slicerControls) {
@@ -333,6 +422,7 @@ export class AssetPanel {
             const newAsset = { name: sliceName, texture, image: newImg, dataUrl };
             this.assets.push(newAsset);
             this._addThumbnail(newAsset);
+            if (this.onAssetsChanged) this.onAssetsChanged(this.assets);
           };
           newImg.src = dataUrl;
           slicedCount++;

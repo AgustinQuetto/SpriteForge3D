@@ -10,8 +10,10 @@ export class GLTFExportManager {
    * Export the given group as a GLB file and trigger download.
    * @param {THREE.Group} exportGroup
    * @param {string} defaultFilename
+   * @param {{ unitScale?: number }} options - Scale applied only to the
+   *   exported clone, leaving the editor scene untouched.
    */
-  static async export(exportGroup, defaultFilename = 'sprite3d-model') {
+  static async export(exportGroup, defaultFilename = 'sprite3d-model', { unitScale = 1 } = {}) {
     if (exportGroup.children.length === 0) {
       throw new Error('No objects to export');
     }
@@ -34,6 +36,9 @@ export class GLTFExportManager {
 
     // Clone the group so we don't mutate the live scene
     const cloneGroup = exportGroup.clone(true);
+    if (Number.isFinite(unitScale) && unitScale > 0 && unitScale !== 1) {
+      cloneGroup.scale.multiplyScalar(unitScale);
+    }
 
     // Ensure all textures have proper images set
     cloneGroup.traverse((child) => {

@@ -2,7 +2,7 @@
  * HistoryManager — Undo/Redo stack for editor operations.
  */
 export class HistoryManager {
-  constructor(maxSteps = 50) {
+  constructor(maxSteps = Infinity) {
     this.undoStack = [];
     this.redoStack = [];
     this.maxSteps = maxSteps;

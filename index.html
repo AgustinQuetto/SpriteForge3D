@@ -44,6 +44,29 @@
 
       <div class="toolbar-divider"></div>
 
+      <!-- Group tools -->
+      <div class="menu-group">
+        <button class="menu-btn" id="menu-btn-grouping" title="Agrupar objetos">
+          <span class="material-symbols-rounded">folder</span>
+          <span class="menu-label">Grupos</span>
+          <span class="material-symbols-rounded menu-arrow">expand_more</span>
+        </button>
+        <div class="dropdown" id="dropdown-grouping">
+          <button id="btn-group-selected" class="dropdown-item">
+            <span class="material-symbols-rounded">create_new_folder</span>
+            Agrupar selecci&oacute;n
+            <span class="dropdown-shortcut">Ctrl/Cmd+G</span>
+          </button>
+          <button id="btn-ungroup-selected" class="dropdown-item">
+            <span class="material-symbols-rounded">folder_open</span>
+            Desagrupar selecci&oacute;n
+            <span class="dropdown-shortcut">Ctrl/Cmd+Shift+G</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="toolbar-divider"></div>
+
       <!-- Add dropdown -->
       <div class="menu-group">
         <button class="menu-btn" id="menu-btn-add">
@@ -107,6 +130,15 @@
             Voxel Relief
             <span class="dropdown-shortcut">M</span>
           </button>
+          <button id="btn-tool-voxel-brush" class="dropdown-item">
+            <span class="material-symbols-rounded">brush</span>
+            Pixel Brush
+            <span class="dropdown-shortcut">V</span>
+          </button>
+          <button id="btn-tool-reference" class="dropdown-item">
+            <span class="material-symbols-rounded">colorize</span>
+            Cuentagotas / referencia
+          </button>
         </div>
       </div>
 
@@ -130,6 +162,10 @@
             Snap to Grid
             <span class="dropdown-shortcut">G</span>
           </button>
+          <label class="dropdown-check-row" title="Ajusta la escala a múltiplos del tamaño del grid">
+            <input type="checkbox" id="input-snap-scale">
+            <span>Ajustar escala al grid</span>
+          </label>
           <button id="btn-snap-asset" class="dropdown-item">
             <span class="material-symbols-rounded">join</span>
             Snap to Asset
@@ -176,6 +212,11 @@
           <span class="material-symbols-rounded menu-arrow">expand_more</span>
         </button>
         <div class="dropdown dropdown-right" id="dropdown-project">
+          <button id="btn-new-project" class="dropdown-item">
+            <span class="material-symbols-rounded">note_add</span>
+            Nuevo proyecto
+          </button>
+          <div class="dropdown-divider"></div>
           <button id="btn-save-project" class="dropdown-item dropdown-item-success">
             <span class="material-symbols-rounded">save</span>
             Guardar proyecto
@@ -191,10 +232,17 @@
             Importar vóxeles
             <span class="dropdown-shortcut">.json</span>
           </button>
+          <button id="btn-import-3d" class="dropdown-item">
+            <span class="material-symbols-rounded">view_in_ar</span>
+            Importar modelo 3D / CAD
+            <span class="dropdown-shortcut">OBJ / FBX / DWG</span>
+          </button>
         </div>
       </div>
       <input type="file" id="file-load-project" accept=".s3d" hidden>
       <input type="file" id="file-import-voxels" accept=".json,application/json" hidden>
+      <input type="file" id="file-import-3d" accept=".obj,.gltf,.glb,.stl,.ply,.fbx,.dae,.dwg,.dxf" multiple hidden>
+      <input type="file" id="file-reference-image" accept="image/png,image/jpeg,image/webp" hidden>
 
       <div class="toolbar-divider"></div>
 
@@ -206,6 +254,7 @@
           <span class="material-symbols-rounded menu-arrow">expand_more</span>
         </button>
         <div class="dropdown dropdown-right" id="dropdown-export">
+          <div class="dropdown-section-label" id="export-scope-label">Escena completa</div>
           <div class="dropdown-section-label">Format</div>
           <button id="btn-export-gltf" class="dropdown-item">
             <span class="material-symbols-rounded">download</span>
@@ -214,6 +263,14 @@
           <button id="btn-export-obj" class="dropdown-item">
             <span class="material-symbols-rounded">download</span>
             OBJ
+          </button>
+          <button id="btn-export-fbx" class="dropdown-item">
+            <span class="material-symbols-rounded">download</span>
+            FBX + texturas pixel-art
+          </button>
+          <button id="btn-export-unreal" class="dropdown-item dropdown-item-accent">
+            <span class="material-symbols-rounded">sports_esports</span>
+            Unreal Engine (GLB)
           </button>
           <div class="dropdown-divider"></div>
           <button id="btn-export-godot" class="dropdown-item dropdown-item-accent">
@@ -236,10 +293,10 @@
           Sprites
         </div>
         <div class="panel-body">
-          <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="Importar sprites PNG">
+          <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="Importar sprites PNG o modelos 3D">
             <span class="material-symbols-rounded drop-icon">cloud_upload</span>
             <p>Importá tu sprite</p>
-            <small>PNG · arrastrá, pegá o hacé clic</small>
+            <small>PNG · OBJ · FBX · GLB · DWG · arrastrá para importar</small>
             <input type="file" id="file-input" accept="image/png" multiple hidden>
           </div>
 
@@ -269,6 +326,15 @@
           </div>
 
           <div id="asset-grid" class="asset-grid"></div>
+
+          <div class="asset-subsection" id="model-assets-section">
+            <div class="asset-subsection-title">
+              <span class="material-symbols-rounded">view_in_ar</span>
+              Modelos 3D / CAD
+            </div>
+            <div id="model-asset-grid" class="asset-grid model-asset-grid"></div>
+            <small class="asset-empty-hint">Los modelos importados quedan disponibles para reutilizarlos.</small>
+          </div>
         </div>
       </div>
 
@@ -281,6 +347,7 @@
           <div id="scene-tree" class="scene-tree">
             <div class="scene-empty">Todavía no hay objetos</div>
           </div>
+          <small class="scene-tree-hint">Arrastrá una pieza sobre otra para agrupar. Soltala en el fondo para sacarla.</small>
         </div>
       </div>
     </aside>
@@ -288,6 +355,38 @@
     <!-- 3D Canvas -->
     <div id="canvas-container">
       <canvas id="viewport"></canvas>
+      <button id="btn-tool-wheel" class="tool-wheel-launcher" type="button" title="Paleta rápida (Q)" aria-label="Abrir paleta rápida de herramientas">
+        <span class="material-symbols-rounded">gesture</span>
+      </button>
+      <div id="tool-wheel" class="tool-wheel" role="menu" aria-label="Paleta rápida de herramientas" hidden>
+        <button class="tool-wheel-item" type="button" role="menuitem" data-wheel-tool="translate" style="--x:0px;--y:-88px" title="Mover (W)">
+          <span class="material-symbols-rounded">open_with</span><small>Mover</small>
+        </button>
+        <button class="tool-wheel-item" type="button" role="menuitem" data-wheel-tool="rotate" style="--x:62px;--y:-62px" title="Rotar (E)">
+          <span class="material-symbols-rounded">rotate_right</span><small>Rotar</small>
+        </button>
+        <button class="tool-wheel-item" type="button" role="menuitem" data-wheel-tool="scale" style="--x:88px;--y:0px" title="Escalar (R)">
+          <span class="material-symbols-rounded">aspect_ratio</span><small>Escalar</small>
+        </button>
+        <button class="tool-wheel-item" type="button" role="menuitem" data-wheel-tool="voxel-brush" style="--x:62px;--y:62px" title="Pincel voxel (V)">
+          <span class="material-symbols-rounded">brush</span><small>Pincel</small>
+        </button>
+        <button class="tool-wheel-item" type="button" role="menuitem" data-wheel-tool="voxel-relief" style="--x:0px;--y:88px" title="Relieve voxel (M)">
+          <span class="material-symbols-rounded">open_in_full</span><small>Relieve</small>
+        </button>
+        <button class="tool-wheel-item" type="button" role="menuitem" data-wheel-tool="cut" style="--x:-62px;--y:62px" title="Cortar (C)">
+          <span class="material-symbols-rounded">content_cut</span><small>Cortar</small>
+        </button>
+        <button class="tool-wheel-item" type="button" role="menuitem" data-wheel-tool="rectangle" style="--x:-88px;--y:0px" title="Rectángulo (B)">
+          <span class="material-symbols-rounded">rectangle</span><small>Rectángulo</small>
+        </button>
+        <button class="tool-wheel-item" type="button" role="menuitem" data-wheel-tool="line" style="--x:-62px;--y:-62px" title="Línea (L)">
+          <span class="material-symbols-rounded">timeline</span><small>Línea</small>
+        </button>
+        <button id="btn-tool-wheel-close" class="tool-wheel-close" type="button" aria-label="Cerrar paleta">
+          <span class="material-symbols-rounded">close</span>
+        </button>
+      </div>
       <nav id="workflow-guide" class="workflow-guide" aria-label="Progreso del flujo">
         <div class="workflow-step active" data-step="import">
           <span class="workflow-number">1</span>
@@ -320,12 +419,38 @@
           </button>
         </div>
         <button id="btn-quick-demo" class="welcome-demo">O probá el editor con un cubo</button>
-        <small>También podés arrastrar archivos PNG o JSON directamente acá.</small>
+        <small>También podés arrastrar archivos PNG, OBJ, FBX, GLB o DWG directamente acá.</small>
       </section>
       <div id="context-hint" class="context-hint" aria-live="polite">
         <span class="material-symbols-rounded">lightbulb</span>
         <span id="context-hint-text">Importá un sprite para empezar.</span>
       </div>
+      <section id="relief-float-panel" class="relief-float-panel" hidden aria-live="polite">
+        <div class="relief-float-header">
+          <div class="relief-float-title">
+            <span class="material-symbols-rounded">open_in_full</span>
+            <span>
+              <strong>Relieve directo</strong>
+              <small id="relief-float-target">Apuntá a una cara voxel</small>
+            </span>
+          </div>
+          <button id="btn-relief-float-exit" class="relief-float-close" type="button" title="Salir de la herramienta" aria-label="Salir de la herramienta">
+            <span class="material-symbols-rounded">close</span>
+          </button>
+        </div>
+        <div id="relief-float-status" class="relief-float-status">Hover para elegir una cara</div>
+        <div class="relief-float-actions">
+          <button id="btn-relief-float-extract" class="relief-float-action extract" type="button">
+            <span class="material-symbols-rounded">north</span>
+            Extraer
+          </button>
+          <button id="btn-relief-float-subtract" class="relief-float-action subtract" type="button">
+            <span class="material-symbols-rounded">south</span>
+            Sustraer
+          </button>
+        </div>
+        <small class="relief-float-hint">Arrastrá arriba/abajo sobre la cara · Shift acelera</small>
+      </section>
       <div id="viewport-info">
         <span id="info-camera">Perspective</span>
         <span id="info-objects">0 objects</span>

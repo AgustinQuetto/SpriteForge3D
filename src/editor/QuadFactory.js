@@ -1,5 +1,60 @@
 import * as THREE from 'three';
-import { ALPHA_THRESHOLD, buildDepthMapFromHeightSource, getImageDataFromMesh, getImageDataFromSource } from './PixelUtils.js';
+import {
+  ALPHA_THRESHOLD,
+  buildDepthMapFromHeightSource,
+  ensureVoxelPaintData,
+  getImageDataFromMesh,
+  getImageDataFromSource,
+  getVoxelGridOrigin,
+  restoreVoxelState,
+  splitVoxelStateBySelection,
+} from './PixelUtils.js';
+
+/**
+ * Creates the texture that represents the current voxel paint layer. The
+ * voxel geometry is generated from sampled pixels, so exporting only vertex
+ * colors would make the result dependent on how the target engine imports
+ * vertex colors. A real canvas texture is embedded by GLTFExporter instead.
+ */
+function createVoxelBakedTexture(imageData, activeMap, colorMap) {
+  if (typeof document === 'undefined') return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = imageData.width;
+  canvas.height = imageData.height;
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+
+  const baked = context.createImageData(imageData.width, imageData.height);
+  for (let pixelIndex = 0; pixelIndex < imageData.width * imageData.height; pixelIndex += 1) {
+    const offset = pixelIndex * 4;
+    const isActive = activeMap ? !!activeMap[pixelIndex] : imageData.data[offset + 3] >= ALPHA_THRESHOLD;
+
+    if (!isActive) {
+      baked.data[offset] = 0;
+      baked.data[offset + 1] = 0;
+      baked.data[offset + 2] = 0;
+      baked.data[offset + 3] = 0;
+      continue;
+    }
+
+    baked.data[offset] = colorMap ? colorMap[offset] : imageData.data[offset];
+    baked.data[offset + 1] = colorMap ? colorMap[offset + 1] : imageData.data[offset + 1];
+    baked.data[offset + 2] = colorMap ? colorMap[offset + 2] : imageData.data[offset + 2];
+    baked.data[offset + 3] = colorMap ? colorMap[offset + 3] : imageData.data[offset + 3];
+  }
+
+  context.putImageData(baked, 0, 0);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.needsUpdate = true;
+  return texture;
+}
 
 /**
  * QuadFactory — Creates textured planes and boxes from sprite textures.
@@ -378,6 +433,16 @@ export class QuadFactory {
 
     // Copy userData
     clone.userData = { ...original.userData };
+    if (original.userData.voxelDepthMap) clone.userData.voxelDepthMap = new Uint16Array(original.userData.voxelDepthMap);
+    if (original.userData.voxelSelection) clone.userData.voxelSelection = new Uint8Array(original.userData.voxelSelection);
+    if (original.userData.voxelActiveMap) clone.userData.voxelActiveMap = new Uint8Array(original.userData.voxelActiveMap);
+    if (original.userData.voxelColorMap) clone.userData.voxelColorMap = new Uint8Array(original.userData.voxelColorMap);
+    if (original.userData.voxelPivotOffset) clone.userData.voxelPivotOffset = [...original.userData.voxelPivotOffset];
+    if (original.userData.voxelBakedTexture) {
+      clone.userData.voxelBakedTexture = Array.isArray(clone.material)
+        ? clone.material.find(material => material?.map)?.map || null
+        : clone.material?.map || null;
+    }
 
     // Offset position to next grid cell (32 units)
     clone.position.x += 32.0;
@@ -385,6 +450,64 @@ export class QuadFactory {
 
     return clone;
   }
+
+  /**
+   * Cut the selected voxel columns out of a mesh and return them as an
+   * independently editable mesh. The caller owns adding the piece to a scene.
+   * @param {THREE.Mesh} original
+   * @param {string} pieceName
+   * @returns {{ piece: THREE.Mesh, movedCount: number, remainingCount: number, localPivotDelta: THREE.Vector3 } | null}
+   */
+  static splitVoxelSelection(original, pieceName = `${original?.name || 'Voxel'} - Pieza`) {
+    if (!original?.userData?.voxelized) return null;
+    const paintData = ensureVoxelPaintData(original);
+    const selection = original.userData.voxelSelection;
+    if (!paintData || !selection) return null;
+
+    const split = splitVoxelStateBySelection({
+      active: paintData.active,
+      selection,
+      depthMap: original.userData.voxelDepthMap,
+      colors: paintData.colors,
+      width: paintData.width,
+      height: paintData.height,
+    });
+    if (!split) return null;
+
+    const piece = QuadFactory.duplicate(original);
+    piece.name = pieceName;
+    piece.position.copy(original.position);
+    piece.quaternion.copy(original.quaternion);
+    piece.scale.copy(original.scale);
+
+    const pixelSize = original.userData.voxelPixelSize || 1;
+    const currentPivot = original.userData.voxelPivotOffset || [0, 0];
+    const selectedPivot = [
+      -paintData.width * pixelSize / 2
+        + (split.bounds.minCol + split.bounds.maxCol + 1) * pixelSize / 2,
+      (paintData.height - 1 - split.bounds.maxRow) * pixelSize,
+    ];
+    const localPivotDelta = new THREE.Vector3(
+      selectedPivot[0] - Number(currentPivot[0] || 0),
+      selectedPivot[1] - Number(currentPivot[1] || 0),
+      0,
+    );
+
+    piece.userData.voxelPivotOffset = selectedPivot;
+    piece.userData.voxelDerivedPiece = true;
+    restoreVoxelState(original, split.remaining);
+    restoreVoxelState(piece, split.piece);
+    QuadFactory.rebuildVoxelGeometry(original);
+    QuadFactory.rebuildVoxelGeometry(piece);
+
+    return {
+      piece,
+      movedCount: split.movedCount,
+      remainingCount: split.remainingCount,
+      localPivotDelta,
+    };
+  }
+
   /**
    * Voxelize a sprite mesh: each non-transparent pixel becomes a coloured cube.
    * Optional per-pixel depth from mesh.userData.voxelDepthMap (relief).
@@ -392,11 +515,35 @@ export class QuadFactory {
    * @param {number} pixelSize
    * @returns {THREE.Mesh}
    */
-  static voxelizeSprite(mesh, pixelSize = 1) {
-    const imageData = getImageDataFromMesh(mesh);
+  static voxelizeSprite(mesh, pixelSize = 1, { preserveScale = false, repeatInfo = null } = {}) {
+    const uvRepeat = repeatInfo || mesh.userData.uvRepeat || [1, 1];
+    const uvOffset = mesh.userData.uvOffset || [0, 0];
+    const repeatX = Math.max(0.0001, Math.abs(Number(uvRepeat[0]) || 1));
+    const repeatY = Math.max(0.0001, Math.abs(Number(uvRepeat[1]) || 1));
+    const usesRepeatedTexture = repeatX !== 1 || repeatY !== 1 || uvOffset[0] !== 0 || uvOffset[1] !== 0;
+    mesh.userData.voxelUsesUVRepeat = usesRepeatedTexture;
+    mesh.userData.voxelRepeat = [repeatX, repeatY];
+
+    const imageData = getImageDataFromMesh(mesh, { respectUV: usesRepeatedTexture });
     if (!imageData) {
       console.warn('voxelizeSprite: mesh has no texture image');
       return mesh;
+    }
+
+    if (usesRepeatedTexture && !preserveScale) {
+      mesh.userData.voxelSourceScale = [mesh.scale.x, mesh.scale.y, mesh.scale.z];
+      mesh.userData.voxelPreviousTextureRepeatOnScale = !!mesh.userData.textureRepeatOnScale;
+      mesh.userData.voxelPreviousTextureRepeatBaseScale = mesh.userData.textureRepeatBaseScale
+        ? [...mesh.userData.textureRepeatBaseScale]
+        : null;
+      mesh.userData.voxelPreviousTextureRepeatBaseUV = mesh.userData.textureRepeatBaseUV
+        ? [...mesh.userData.textureRepeatBaseUV]
+        : null;
+      mesh.scale.x /= repeatX;
+      mesh.scale.y /= repeatY;
+      mesh.userData.voxelScaleCompensation = [repeatX, repeatY, 1];
+      // The voxel geometry now contains the repeated pattern itself.
+      mesh.userData.textureRepeatOnScale = false;
     }
 
     const { width, height } = imageData;
@@ -412,6 +559,10 @@ export class QuadFactory {
     mesh.userData.voxelImageWidth = width;
     mesh.userData.voxelImageHeight = height;
     mesh.userData.voxelPixelSize = pixelSize;
+    // Copy the source once. Future brush edits use these arrays instead of
+    // mutating the user's texture, so the original reference image remains
+    // available for re-applying heightmaps and saving the project.
+    ensureVoxelPaintData(mesh, imageData);
 
     return QuadFactory.rebuildVoxelGeometry(mesh);
   }
@@ -422,12 +573,15 @@ export class QuadFactory {
    * @returns {THREE.Mesh}
    */
   static rebuildVoxelGeometry(mesh) {
-    const imageData = getImageDataFromMesh(mesh);
+    const imageData = getImageDataFromMesh(mesh, { respectUV: !!mesh.userData.voxelUsesUVRepeat });
     if (!imageData) return mesh;
 
     const { data, width: imgW, height: imgH } = imageData;
     const pixelSize = mesh.userData.voxelPixelSize || 1;
     const depthMap = mesh.userData.voxelDepthMap || new Uint16Array(imgW * imgH);
+    const paintData = ensureVoxelPaintData(mesh, imageData);
+    const activeMap = paintData?.active;
+    const colorMap = paintData?.colors;
 
     const voxels = [];
     for (let row = 0; row < imgH; row++) {
@@ -435,20 +589,38 @@ export class QuadFactory {
         const pi = row * imgW + col;
         const i = pi * 4;
         const a = data[i + 3];
-        if (a < ALPHA_THRESHOLD) continue;
+        if (activeMap ? !activeMap[pi] : a < ALPHA_THRESHOLD) continue;
         voxels.push({
           col,
           row,
-          r: data[i],
-          g: data[i + 1],
-          b: data[i + 2],
+          r: colorMap ? colorMap[i] : data[i],
+          g: colorMap ? colorMap[i + 1] : data[i + 1],
+          b: colorMap ? colorMap[i + 2] : data[i + 2],
           depth: depthMap[pi] || 0,
         });
       }
     }
 
     if (voxels.length === 0) {
-      console.warn('rebuildVoxelGeometry: no opaque pixels found');
+      mesh.geometry?.dispose();
+      if (Array.isArray(mesh.material)) mesh.material.forEach(m => m.dispose());
+      else mesh.material?.dispose();
+      mesh.userData.voxelBakedTexture?.dispose();
+      mesh.userData.voxelBakedTexture = null;
+
+      const emptyGeometry = new THREE.BufferGeometry();
+      emptyGeometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+      emptyGeometry.setAttribute('normal', new THREE.Float32BufferAttribute([], 3));
+      emptyGeometry.setAttribute('uv', new THREE.Float32BufferAttribute([], 2));
+      emptyGeometry.setAttribute('color', new THREE.Float32BufferAttribute([], 3));
+      emptyGeometry.setIndex([]);
+      mesh.geometry = emptyGeometry;
+      mesh.material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0 });
+      mesh.userData.voxelized = true;
+      mesh.userData.voxelCount = 0;
+      mesh.userData.voxelPixelSize = pixelSize;
+      mesh.userData.voxelImageWidth = imgW;
+      mesh.userData.voxelImageHeight = imgH;
       return mesh;
     }
 
@@ -457,86 +629,122 @@ export class QuadFactory {
       return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
     };
 
-    const originX = -imgW * pixelSize / 2 + pixelSize / 2;
-    const originY = pixelSize / 2;
+    const { x: originX, y: originY } = getVoxelGridOrigin(mesh, imgW, imgH);
+    const half = pixelSize / 2;
+    const baseZ = -half;
+    const columns = new Map(voxels.map(voxel => [voxel.row * imgW + voxel.col, voxel]));
 
-    let totalVerts = 0;
-    let totalIndices = 0;
-    const boxParts = [];
+    const heightAt = (row, col) => {
+      const voxel = columns.get(row * imgW + col);
+      return voxel ? (voxel.depth + 0.5) * pixelSize : baseZ;
+    };
 
+    // Count only visible faces so the final buffers are allocated once.
+    let faceCount = 0;
     for (const voxel of voxels) {
-      const depthLayers = 1 + voxel.depth;
-      const boxDepth = pixelSize * depthLayers;
-      const box = new THREE.BoxGeometry(pixelSize, pixelSize, boxDepth);
-      const posAttr = box.getAttribute('position');
-      const normAttr = box.getAttribute('normal');
-      const uvAttr = box.getAttribute('uv');
-      const indexAttr = box.getIndex();
-
-      const voxelX = originX + voxel.col * pixelSize;
-      const voxelY = originY + (imgH - 1 - voxel.row) * pixelSize;
-      const voxelZ = (voxel.depth * pixelSize) / 2;
-
-      boxParts.push({
-        positions: posAttr.array.slice(),
-        normals: normAttr.array.slice(),
-        uvs: uvAttr.array.slice(),
-        indices: indexAttr.array.slice(),
-        vertCount: posAttr.count,
-        voxelX, voxelY, voxelZ,
-        colourR: srgbToLinear(voxel.r),
-        colourG: srgbToLinear(voxel.g),
-        colourB: srgbToLinear(voxel.b),
-      });
-
-      totalVerts += posAttr.count;
-      totalIndices += indexAttr.count;
-      box.dispose();
+      const topZ = heightAt(voxel.row, voxel.col);
+      faceCount += 2; // front and back
+      if (topZ > heightAt(voxel.row, voxel.col - 1)) faceCount += 1;
+      if (topZ > heightAt(voxel.row, voxel.col + 1)) faceCount += 1;
+      if (topZ > heightAt(voxel.row - 1, voxel.col)) faceCount += 1;
+      if (topZ > heightAt(voxel.row + 1, voxel.col)) faceCount += 1;
     }
 
-    const positions = new Float32Array(totalVerts * 3);
-    const normals = new Float32Array(totalVerts * 3);
-    const uvs = new Float32Array(totalVerts * 2);
-    const colors = new Float32Array(totalVerts * 3);
-    const indices = new Uint32Array(totalIndices);
+    const positions = new Float32Array(faceCount * 4 * 3);
+    const normals = new Float32Array(faceCount * 4 * 3);
+    const uvs = new Float32Array(faceCount * 4 * 2);
+    const colors = new Float32Array(faceCount * 4 * 3);
+    const indices = new Uint32Array(faceCount * 6);
 
-    let vertOffset = 0;
-    let idxOffset = 0;
-
-    for (const part of boxParts) {
-      const {
-        positions: boxPos, normals: boxNorm, uvs: boxUv, indices: boxIdx,
-        vertCount, voxelX, voxelY, voxelZ, colourR, colourG, colourB,
-      } = part;
-      const vertBase = vertOffset;
-
-      for (let v = 0; v < vertCount; v++) {
-        const src = v * 3;
-        const dst = (vertBase + v) * 3;
-        positions[dst]     = boxPos[src] + voxelX;
-        positions[dst + 1] = boxPos[src + 1] + voxelY;
-        positions[dst + 2] = boxPos[src + 2] + voxelZ;
-
-        normals[dst]     = boxNorm[src];
-        normals[dst + 1] = boxNorm[src + 1];
-        normals[dst + 2] = boxNorm[src + 2];
-
-        colors[dst]     = colourR;
-        colors[dst + 1] = colourG;
-        colors[dst + 2] = colourB;
-
-        const uvSrc = v * 2;
-        const uvDst = (vertBase + v) * 2;
-        uvs[uvDst]     = boxUv[uvSrc];
-        uvs[uvDst + 1] = boxUv[uvSrc + 1];
+    let vertexOffset = 0;
+    let indexOffset = 0;
+    const addQuad = (corners, normal, color, uvCorners) => {
+      for (let cornerIndex = 0; cornerIndex < 4; cornerIndex += 1) {
+        const positionOffset = (vertexOffset + cornerIndex) * 3;
+        const uvOffset = (vertexOffset + cornerIndex) * 2;
+        positions[positionOffset] = corners[cornerIndex][0];
+        positions[positionOffset + 1] = corners[cornerIndex][1];
+        positions[positionOffset + 2] = corners[cornerIndex][2];
+        normals[positionOffset] = normal[0];
+        normals[positionOffset + 1] = normal[1];
+        normals[positionOffset + 2] = normal[2];
+        colors[positionOffset] = color[0];
+        colors[positionOffset + 1] = color[1];
+        colors[positionOffset + 2] = color[2];
+        uvs[uvOffset] = uvCorners[cornerIndex][0];
+        uvs[uvOffset + 1] = uvCorners[cornerIndex][1];
       }
 
-      for (let idx = 0; idx < boxIdx.length; idx++) {
-        indices[idxOffset + idx] = boxIdx[idx] + vertBase;
+      indices[indexOffset] = vertexOffset;
+      indices[indexOffset + 1] = vertexOffset + 1;
+      indices[indexOffset + 2] = vertexOffset + 2;
+      indices[indexOffset + 3] = vertexOffset;
+      indices[indexOffset + 4] = vertexOffset + 2;
+      indices[indexOffset + 5] = vertexOffset + 3;
+      vertexOffset += 4;
+      indexOffset += 6;
+    };
+
+    for (const voxel of voxels) {
+      const x0 = originX + voxel.col * pixelSize - half;
+      const x1 = x0 + pixelSize;
+      const y0 = originY + (imgH - 1 - voxel.row) * pixelSize - half;
+      const y1 = y0 + pixelSize;
+      const topZ = heightAt(voxel.row, voxel.col);
+      const u0 = voxel.col / imgW;
+      const u1 = (voxel.col + 1) / imgW;
+      const v0 = 1 - (voxel.row + 1) / imgH;
+      const v1 = 1 - voxel.row / imgH;
+      const color = [srgbToLinear(voxel.r), srgbToLinear(voxel.g), srgbToLinear(voxel.b)];
+
+      // The bottom is omitted intentionally: it is coplanar for every voxel and
+      // is never visible in the editor or in a normal static-mesh import.
+      addQuad(
+        [[x0, y0, baseZ], [x0, y1, baseZ], [x1, y1, baseZ], [x1, y0, baseZ]],
+        [0, 0, -1], color,
+        [[u0, v0], [u0, v1], [u1, v1], [u1, v0]],
+      );
+      addQuad(
+        [[x0, y0, topZ], [x1, y0, topZ], [x1, y1, topZ], [x0, y1, topZ]],
+        [0, 0, 1], color,
+        [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+      );
+
+      const leftHeight = heightAt(voxel.row, voxel.col - 1);
+      if (topZ > leftHeight) {
+        addQuad(
+          [[x0, y0, leftHeight], [x0, y0, topZ], [x0, y1, topZ], [x0, y1, leftHeight]],
+          [-1, 0, 0], color,
+          [[u0, v0], [u0, v1], [u1, v1], [u1, v0]],
+        );
       }
 
-      vertOffset += vertCount;
-      idxOffset += boxIdx.length;
+      const rightHeight = heightAt(voxel.row, voxel.col + 1);
+      if (topZ > rightHeight) {
+        addQuad(
+          [[x1, y0, rightHeight], [x1, y1, rightHeight], [x1, y1, topZ], [x1, y0, topZ]],
+          [1, 0, 0], color,
+          [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+        );
+      }
+
+      const bottomHeight = heightAt(voxel.row + 1, voxel.col);
+      if (topZ > bottomHeight) {
+        addQuad(
+          [[x0, y0, bottomHeight], [x1, y0, bottomHeight], [x1, y0, topZ], [x0, y0, topZ]],
+          [0, -1, 0], color,
+          [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+        );
+      }
+
+      const topHeight = heightAt(voxel.row - 1, voxel.col);
+      if (topZ > topHeight) {
+        addQuad(
+          [[x0, y1, topHeight], [x0, y1, topZ], [x1, y1, topZ], [x1, y1, topHeight]],
+          [0, 1, 0], color,
+          [[u0, v0], [u0, v1], [u1, v1], [u1, v0]],
+        );
+      }
     }
 
     const mergedGeom = new THREE.BufferGeometry();
@@ -554,20 +762,62 @@ export class QuadFactory {
       mesh.material.dispose();
     }
 
+    mesh.userData.voxelBakedTexture?.dispose();
+    const bakedTexture = createVoxelBakedTexture(imageData, activeMap, colorMap);
+    mesh.userData.voxelBakedTexture = bakedTexture;
+
     mesh.geometry = mergedGeom;
     mesh.material = new THREE.MeshStandardMaterial({
-      vertexColors: true,
+      map: bakedTexture,
+      color: 0xffffff,
+      transparent: !!bakedTexture,
+      alphaTest: bakedTexture ? 0.1 : 0,
+      side: THREE.DoubleSide,
+      vertexColors: !bakedTexture,
       roughness: 0.85,
       metalness: 0
     });
 
     mesh.userData.voxelized = true;
+    mesh.userData.voxelCount = voxels.length;
     mesh.userData.voxelPixelSize = pixelSize;
     mesh.userData.voxelImageWidth = imgW;
     mesh.userData.voxelImageHeight = imgH;
+    mesh.userData.voxelMeshing = 'visible-surfaces';
+    mesh.userData.voxelFaceCount = faceCount;
+    mesh.userData.voxelTriangleCount = faceCount * 2;
     mesh.userData.type = 'voxel';
 
     return mesh;
+  }
+
+  /**
+   * Paint or erase one pixel in the editable voxel layer.
+   * @param {THREE.Mesh} mesh voxelized sprite
+   * @param {number} col image-space column
+   * @param {number} row image-space row
+   * @param {boolean} active whether the pixel should have a voxel
+   * @param {{r:number,g:number,b:number,a?:number}|null} color
+   */
+  static setVoxelPixel(mesh, col, row, active, color = null) {
+    const paintData = ensureVoxelPaintData(mesh);
+    if (!paintData) return false;
+    if (col < 0 || col >= paintData.width || row < 0 || row >= paintData.height) return false;
+
+    const pi = row * paintData.width + col;
+    const ci = pi * 4;
+    const wasActive = !!paintData.active[pi];
+    const nextActive = !!active;
+    paintData.active[pi] = nextActive ? 1 : 0;
+
+    if (color && nextActive) {
+      paintData.colors[ci] = Math.max(0, Math.min(255, Math.round(color.r)));
+      paintData.colors[ci + 1] = Math.max(0, Math.min(255, Math.round(color.g)));
+      paintData.colors[ci + 2] = Math.max(0, Math.min(255, Math.round(color.b)));
+      paintData.colors[ci + 3] = Math.max(0, Math.min(255, Math.round(color.a ?? 255)));
+    }
+
+    return wasActive !== nextActive || !!color;
   }
 
   /**
@@ -610,7 +860,7 @@ export class QuadFactory {
       return mesh;
     }
 
-    const spriteData = getImageDataFromMesh(mesh);
+    const spriteData = getImageDataFromMesh(mesh, { respectUV: !!mesh.userData.voxelUsesUVRepeat });
     const heightData = getImageDataFromSource(heightImage);
     if (!spriteData || !heightData) return mesh;
 
@@ -643,7 +893,7 @@ export class QuadFactory {
       return mesh;
     }
 
-    const spriteData = getImageDataFromMesh(mesh);
+    const spriteData = getImageDataFromMesh(mesh, { respectUV: !!mesh.userData.voxelUsesUVRepeat });
     if (!spriteData) return mesh;
 
     const maxDepth = opts.maxDepth ?? mesh.userData.voxelHeightMax ?? 8;
@@ -700,7 +950,17 @@ export class QuadFactory {
    * @returns {THREE.Mesh}
    */
   static devoxelizeSprite(mesh) {
-    const texture = mesh.userData.texture;
+    const userData = mesh.userData;
+    const texture = userData.texture;
+    const scaleCompensation = userData.voxelScaleCompensation
+      || (userData.voxelUsesUVRepeat ? userData.voxelRepeat : null);
+    const previousRepeatState = {
+      enabled: userData.voxelPreviousTextureRepeatOnScale,
+      baseScale: userData.voxelPreviousTextureRepeatBaseScale,
+      baseUV: userData.voxelPreviousTextureRepeatBaseUV,
+    };
+    const uvRepeat = userData.uvRepeat || [1, 1];
+    const uvOffset = userData.uvOffset || [0, 0];
     const width   = mesh.userData.originalWidth  || 32;
     const height  = mesh.userData.originalHeight || 32;
 
@@ -713,6 +973,8 @@ export class QuadFactory {
     } else if (mesh.material) {
       mesh.material.dispose();
     }
+    userData.voxelBakedTexture?.dispose();
+    userData.voxelBakedTexture = null;
 
     mesh.geometry = geom;
 
@@ -723,6 +985,8 @@ export class QuadFactory {
       matTex.minFilter  = THREE.NearestMipMapLinearFilter;
       matTex.wrapS = THREE.RepeatWrapping;
       matTex.wrapT = THREE.RepeatWrapping;
+      matTex.repeat.set(uvRepeat[0], uvRepeat[1]);
+      matTex.offset.set(uvOffset[0], uvOffset[1]);
       matTex.needsUpdate = true;
 
       mesh.material = new THREE.MeshStandardMaterial({
@@ -742,14 +1006,39 @@ export class QuadFactory {
       });
     }
 
-    mesh.userData.voxelized = false;
-    mesh.userData.type = 'quad';
-    mesh.userData.extrusionDepth = 0;
-    mesh.userData.voxelDepthMap = null;
-    mesh.userData.voxelSelection = null;
-    mesh.userData.voxelHeightmapSource = null;
-    mesh.userData.voxelHeightmapName = null;
-    mesh.userData.voxelHeightmapImage = null;
+    if (scaleCompensation) {
+      mesh.scale.x *= Number(scaleCompensation[0]) || 1;
+      mesh.scale.y *= Number(scaleCompensation[1]) || 1;
+    }
+    if (previousRepeatState.enabled !== undefined && previousRepeatState.enabled !== null) {
+      userData.textureRepeatOnScale = !!previousRepeatState.enabled;
+      userData.textureRepeatBaseScale = previousRepeatState.baseScale
+        ? [...previousRepeatState.baseScale]
+        : [mesh.scale.x, mesh.scale.y];
+      userData.textureRepeatBaseUV = previousRepeatState.baseUV
+        ? [...previousRepeatState.baseUV]
+        : [...uvRepeat];
+    }
+
+    userData.voxelized = false;
+    userData.type = 'quad';
+    userData.extrusionDepth = 0;
+    userData.voxelDepthMap = null;
+    userData.voxelSelection = null;
+    userData.voxelActiveMap = null;
+    userData.voxelColorMap = null;
+    userData.voxelHeightmapSource = null;
+    userData.voxelHeightmapName = null;
+    userData.voxelHeightmapImage = null;
+    delete userData.voxelUsesUVRepeat;
+    delete userData.voxelRepeat;
+    delete userData.voxelSourceScale;
+    delete userData.voxelScaleCompensation;
+    delete userData.voxelPreviousTextureRepeatOnScale;
+    delete userData.voxelPreviousTextureRepeatBaseScale;
+    delete userData.voxelPreviousTextureRepeatBaseUV;
+    delete userData.voxelPivotOffset;
+    delete userData.voxelDerivedPiece;
 
     return mesh;
   }

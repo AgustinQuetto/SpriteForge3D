@@ -3,6 +3,14 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { applyAssetSnap } from '../editor/AssetSnap.js';
 
+function disposeObject3D(root) {
+  root?.traverse?.(node => {
+    node.geometry?.dispose();
+    if (Array.isArray(node.material)) node.material.forEach(material => material?.dispose());
+    else node.material?.dispose();
+  });
+}
+
 export class SceneManager {
   constructor(canvas) {
     this.canvas = canvas;
@@ -11,9 +19,16 @@ export class SceneManager {
     this.selectedObjects = []; // Array of selected meshes/groups
     this.gridVisible = true;
     this.snapEnabled = false;
+    this.scaleSnapEnabled = false;
     this.assetSnapEnabled = false;
     this.snapSize = 32.0;
     this.cameraMode = 'perspective';
+    this.cameraMoveVelocity = new THREE.Vector3();
+    this.cameraMoveSpeed = 240;
+    this.cameraMoveBoost = 4;
+    this.cameraMoveAcceleration = 14;
+    this.cameraMoveDeceleration = 18;
+    this.cameraWorldUp = new THREE.Vector3(0, 1, 0);
 
     // Group for temporary multi-selection transformation
     this.tempSelectionGroup = new THREE.Group();
@@ -50,6 +65,11 @@ export class SceneManager {
     this.exportGroup = new THREE.Group();
     this.exportGroup.name = 'ExportGroup';
     this.scene.add(this.exportGroup);
+
+    // Reference images are editor guides, never exportable scene objects.
+    this.referenceGroup = new THREE.Group();
+    this.referenceGroup.name = 'ReferenceImages';
+    this.scene.add(this.referenceGroup);
     this.scene.add(this.tempSelectionGroup);
   }
 
@@ -90,11 +110,19 @@ export class SceneManager {
     this.transformControls.addEventListener('dragging-changed', (e) => {
       this.orbit.enabled = !e.value;
 
+      if (e.value && this.onTransformStart) {
+        this.onTransformStart(this.transformControls.object);
+      }
+
       // When dragging STOPS, if we were using the temp group,
       // unpack and re-pack so gizmo stays in place.
       if (!e.value && this.tempSelectionGroup.children.length > 0) {
         this._unpackTempGroup();
         this._packTempGroup();
+      }
+
+      if (!e.value && this.onTransformEnd) {
+        this.onTransformEnd(this.transformControls.object);
       }
     });
 
@@ -115,6 +143,12 @@ export class SceneManager {
           if (this.assetSnapEnabled) {
             this.snapObjectToAssets(obj);
           }
+        }
+      } else if (this.transformControls.mode === 'scale' && this.snapEnabled && this.scaleSnapEnabled) {
+        const obj = this.transformControls.object;
+        if (obj) {
+          this.snapObjectScaleToGrid(obj);
+          this.snapObjectToGrid(obj);
         }
       }
       
@@ -141,7 +175,11 @@ export class SceneManager {
     const snapSize = customSnapSize || this.snapSize;
     if (!snapSize) return;
 
-    let width = mesh.userData.originalWidth;
+    // A separated voxel piece keeps the source sprite dimensions for UV and
+    // paint coordinates, so snapping must measure its actual visible bounds.
+    let width = mesh.userData.voxelDerivedPiece
+      ? undefined
+      : mesh.userData.originalWidth;
     let depth = mesh.userData.extrusionDepth || 0;
 
     if (width === undefined && mesh.geometry) {
@@ -149,6 +187,11 @@ export class SceneManager {
       const box = mesh.geometry.boundingBox;
       width = (box.max.x - box.min.x) * mesh.scale.x;
       depth = (box.max.z - box.min.z) * mesh.scale.z;
+    } else if (width === undefined) {
+      const box = new THREE.Box3().setFromObject(mesh);
+      const size = box.getSize(new THREE.Vector3());
+      width = size.x;
+      depth = size.z;
     } else {
       width = (width || 32) * mesh.scale.x;
       depth = depth * mesh.scale.z;
@@ -191,6 +234,44 @@ export class SceneManager {
     }
   }
 
+  /**
+   * Snap an object's dimensions to whole grid cells while scaling.
+   * Planes use their X/Y dimensions, while volumetric meshes also use Z.
+   * Scene groups are measured in world space so multi-selection scaling works.
+   */
+  snapObjectScaleToGrid(mesh, customSnapSize = null) {
+    if (!mesh) return;
+    const snapSize = customSnapSize || this.snapSize;
+    if (!snapSize) return;
+
+    const isGroup = mesh === this.tempSelectionGroup
+      || mesh.userData?.isSceneGroup
+      || mesh.userData?.type === 'imported-3d';
+    const dimensions = new THREE.Vector3();
+
+    if (isGroup) {
+      new THREE.Box3().setFromObject(mesh).getSize(dimensions);
+    } else if (mesh.geometry) {
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      mesh.geometry.boundingBox.getSize(dimensions);
+      dimensions.multiply(mesh.scale).set(
+        Math.abs(dimensions.x),
+        Math.abs(dimensions.y),
+        Math.abs(dimensions.z),
+      );
+    } else {
+      return;
+    }
+
+    ['x', 'y', 'z'].forEach(axis => {
+      const currentSize = dimensions[axis];
+      if (currentSize <= 0.0001) return;
+
+      const targetSize = Math.max(snapSize, Math.round(currentSize / snapSize) * snapSize);
+      mesh.scale[axis] *= targetSize / currentSize;
+    });
+  }
+
   _initGrid(cellSize = 32.0) {
     if (this.grid) this.scene.remove(this.grid);
  
@@ -209,6 +290,13 @@ export class SceneManager {
   updateGrid(cellSize) {
     this.snapSize = cellSize;
     this._initGrid(cellSize);
+    if (this.snapEnabled) {
+      this.transformControls.setTranslationSnap(cellSize);
+      this.selectedObjects.forEach(obj => {
+        if (this.scaleSnapEnabled) this.snapObjectScaleToGrid(obj);
+        this.snapObjectToGrid(obj);
+      });
+    }
   }
 
   _initLights() {
@@ -266,6 +354,52 @@ export class SceneManager {
     if (infoEl) infoEl.textContent = mode === 'perspective' ? 'Perspective' : 'Orthographic';
   }
 
+  /**
+   * Move the camera independently from its zoom distance.
+   * WASD input is expressed as a direction and translated together with the
+   * orbit target, so OrbitControls keeps the same view while navigation speed
+   * remains stable at every zoom level.
+   */
+  updateCameraMovement(keys, deltaTime) {
+    if (this.transformControls.dragging) {
+      this.cameraMoveVelocity.set(0, 0, 0);
+      return;
+    }
+
+    const inputX = (keys.has('d') ? 1 : 0) - (keys.has('a') ? 1 : 0);
+    const inputZ = (keys.has('s') ? 1 : 0) - (keys.has('w') ? 1 : 0);
+    const hasInput = inputX !== 0 || inputZ !== 0;
+
+    const forward = new THREE.Vector3();
+    this.camera.getWorldDirection(forward);
+    // Keep editor navigation parallel to the ground plane. Looking downward
+    // should not make W move the camera into the floor.
+    forward.y = 0;
+    if (forward.lengthSq() < 1e-8) forward.set(0, 0, -1);
+    else forward.normalize();
+
+    const right = new THREE.Vector3().crossVectors(forward, this.cameraWorldUp).normalize();
+    const desiredDirection = new THREE.Vector3()
+      .addScaledVector(right, inputX)
+      .addScaledVector(forward, -inputZ);
+    if (desiredDirection.lengthSq() > 1e-8) desiredDirection.normalize();
+
+    const speed = this.cameraMoveSpeed * (keys.has('shift') ? this.cameraMoveBoost : 1);
+    const desiredVelocity = desiredDirection.multiplyScalar(hasInput ? speed : 0);
+    const response = 1 - Math.exp(-(hasInput ? this.cameraMoveAcceleration : this.cameraMoveDeceleration) * deltaTime);
+    this.cameraMoveVelocity.lerp(desiredVelocity, response);
+
+    if (this.cameraMoveVelocity.lengthSq() < 0.0001) {
+      this.cameraMoveVelocity.set(0, 0, 0);
+      return;
+    }
+
+    const movement = this.cameraMoveVelocity.clone().multiplyScalar(deltaTime);
+    this.camera.position.add(movement);
+    this.orbit.target.add(movement);
+    this.orbit.update();
+  }
+
   setTransformMode(mode) {
     this.transformControls.setMode(mode);
   }
@@ -275,10 +409,23 @@ export class SceneManager {
     if (enabled) {
       this.transformControls.setTranslationSnap(this.snapSize);
       this.transformControls.setRotationSnap(THREE.MathUtils.degToRad(15));
+      if (this.scaleSnapEnabled) {
+        this.selectedObjects.forEach(obj => this.snapObjectScaleToGrid(obj));
+      }
       this.selectedObjects.forEach(obj => this.snapObjectToGrid(obj));
     } else {
       this.transformControls.setTranslationSnap(null);
       this.transformControls.setRotationSnap(null);
+    }
+  }
+
+  setScaleSnap(enabled) {
+    this.scaleSnapEnabled = enabled;
+    if (enabled && this.snapEnabled) {
+      this.selectedObjects.forEach(obj => {
+        this.snapObjectScaleToGrid(obj);
+        this.snapObjectToGrid(obj);
+      });
     }
   }
 
@@ -324,7 +471,21 @@ export class SceneManager {
     this._updateObjectCount();
   }
 
-  removeObject(mesh) {
+  addReference(mesh) {
+    this.referenceGroup.add(mesh);
+  }
+
+  removeReference(mesh, { dispose = true } = {}) {
+    if (!mesh) return;
+    this.referenceGroup.remove(mesh);
+    if (dispose) {
+      mesh.geometry?.dispose();
+      if (Array.isArray(mesh.material)) mesh.material.forEach(m => m.dispose());
+      else mesh.material?.dispose();
+    }
+  }
+
+  removeObject(mesh, { dispose = true } = {}) {
     if (this.selectedObjects.includes(mesh)) {
       this.deselectObject(mesh);
     }
@@ -333,14 +494,8 @@ export class SceneManager {
     const idx = this.objects.indexOf(mesh);
     if (idx >= 0) this.objects.splice(idx, 1);
 
-    // Dispose geometry & materials
-    if (mesh.geometry) mesh.geometry.dispose();
-    if (mesh.material) {
-      if (Array.isArray(mesh.material)) {
-        mesh.material.forEach(m => m.dispose());
-      } else {
-        mesh.material.dispose();
-      }
+    if (dispose) {
+      disposeObject3D(mesh);
     }
 
     this._updateObjectCount();
@@ -424,13 +579,18 @@ export class SceneManager {
     this.mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
 
     this.raycaster.setFromCamera(this.mouse, this.camera);
-    const intersects = this.raycaster.intersectObjects(customObjects || this.objects, false);
+    const intersects = this.raycaster.intersectObjects(customObjects || this.objects, true);
 
     if (intersects.length > 0) {
       const hit = intersects[0].object;
-      // Bubble up to scene group if hit mesh belongs to one
-      if (!customObjects && hit.parent?.userData?.isSceneGroup) {
-        return hit.parent;
+      if (!customObjects) {
+        const object = hit.userData?.importedRoot || hit;
+        let parent = object.parent;
+        while (parent && parent !== this.exportGroup) {
+          if (parent.userData?.isSceneGroup) return parent;
+          parent = parent.parent;
+        }
+        return object;
       }
       return hit;
     }
@@ -475,6 +635,13 @@ export class SceneManager {
     return children;
   }
 
+  restoreGroup(group, children) {
+    if (!group) return;
+    if (!this.groups.includes(group)) this.groups.push(group);
+    if (group.parent !== this.exportGroup) this.exportGroup.add(group);
+    (children || []).forEach(child => group.attach(child));
+  }
+
   removeGroup(group) {
     if (this.selectedObjects.includes(group)) {
       this.deselectObject(group);
@@ -505,7 +672,7 @@ export class SceneManager {
     this.mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
 
     this.raycaster.setFromCamera(this.mouse, this.camera);
-    const intersects = this.raycaster.intersectObjects(this.objects, false);
+    const intersects = this.raycaster.intersectObjects(this.objects, true);
     return intersects[0] ?? null;
   }
 
@@ -531,6 +698,7 @@ export class SceneManager {
 
   clear() {
     this.deselectObject();
+    [...this.referenceGroup.children].forEach(reference => this.removeReference(reference));
     const grps = [...this.groups];
     for (const g of grps) this.removeGroup(g);
     const objs = [...this.objects];

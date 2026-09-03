@@ -3,6 +3,7 @@ import { UVUnwrapper } from 'xatlas-three';
 import { UVsDebug } from 'three/addons/utils/UVsDebug.js';
 import xatlasWorkerUrl from 'xatlasjs/dist/xatlas.js?url';
 import xatlasWasmUrl from 'xatlasjs/dist/xatlas.wasm?url';
+import { CYLINDER_UV_LAYOUT_VERSION, createCylinderUVLayout } from './CylinderUVLayout.js';
  
 /**
  * UVExporter — Generates 2D texture templates for 3D meshes.
@@ -19,12 +20,13 @@ export class UVExporter {
     }
 
     const safeResolution = this._sanitizeResolution(resolution);
-    await this._ensureXAtlasLoaded();
+    const existingLayout = this._hasReusableUVLayout(mesh);
+    const workGeometry = existingLayout
+      ? mesh.geometry.clone()
+      : await this._createUVLayoutGeometry(mesh);
 
-    const workGeometry = await this._unwrapGeometryForRealUV(mesh);
-
-    if (applyToMesh) {
-      this._applyGeometryToMesh(mesh, workGeometry);
+    if (applyToMesh && !existingLayout) {
+      this._applyGeometryToMesh(mesh, workGeometry, this._layoutTypeForMesh(mesh));
     }
 
     const debugCanvas = UVsDebug(workGeometry, safeResolution);
@@ -47,9 +49,11 @@ export class UVExporter {
     if (!mesh?.geometry) {
       throw new Error('No mesh geometry selected');
     }
-    await this._ensureXAtlasLoaded();
-    const workGeometry = await this._unwrapGeometryForRealUV(mesh);
-    this._applyGeometryToMesh(mesh, workGeometry);
+    if (this._hasReusableUVLayout(mesh)) return false;
+
+    const workGeometry = await this._createUVLayoutGeometry(mesh);
+    this._applyGeometryToMesh(mesh, workGeometry, this._layoutTypeForMesh(mesh));
+    return true;
   }
 
   /**
@@ -286,13 +290,33 @@ export class UVExporter {
     return indexed;
   }
 
-  static _applyGeometryToMesh(mesh, geometry) {
+  static _hasReusableUVLayout(mesh) {
+    return !!mesh.userData.realUVApplied && !!mesh.geometry?.getAttribute?.('uv')?.count;
+  }
+
+  static _layoutTypeForMesh(mesh) {
+    return mesh.userData.type === 'cylinder'
+      ? `cylinder-v${CYLINDER_UV_LAYOUT_VERSION}`
+      : 'xatlas';
+  }
+
+  static async _createUVLayoutGeometry(mesh) {
+    if (mesh.userData.type === 'cylinder') {
+      return createCylinderUVLayout(mesh.geometry);
+    }
+
+    await this._ensureXAtlasLoaded();
+    return this._unwrapGeometryForRealUV(mesh);
+  }
+
+  static _applyGeometryToMesh(mesh, geometry, layoutType = 'xatlas') {
     const previousGeometry = mesh.geometry;
     mesh.geometry = geometry.clone();
     mesh.geometry.computeBoundingBox();
     mesh.geometry.computeBoundingSphere();
     mesh.geometry.computeVertexNormals();
     mesh.userData.realUVApplied = true;
+    mesh.userData.uvLayoutType = layoutType;
     previousGeometry.dispose();
   }
 

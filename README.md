@@ -8,7 +8,10 @@ Editor y pipeline orientado a flujo "2D -> pixel-volume 3D" desde assets PNG. Pu
 - Importacion de voxels JSON dispersos (`voxel-binary-sparse-v1`).
 - Creacion de primitivas (plane, cube, cylinder).
 - Edicion de vertices, transformaciones, duplicado y borrado.
-- Exportacion a GLTF, OBJ y Godot MeshLibrary.
+- Separacion de una seleccion voxel en una pieza nueva editable de forma independiente.
+- Agrupacion de objetos con exportacion individual de la seleccion.
+- Exportacion a GLTF, OBJ, FBX y Godot MeshLibrary.
+- FBX aplica la correccion de orientacion Y de 180 grados y genera las texturas auxiliares con sus sidecars `.meta` (Point, sin mipmaps, sin compresion y en sRGB); guarda todos los archivos junto al `.fbx` para conservar el pixel-art en Unity.
 - Export de UV Layout real con xatlas y aplicacion de texturas custom.
 - Guardado/carga de proyecto `.s3d`.
 - CLI automatizable con salida JSON para voxelizado, auto-relief, ensamblaje y validacion visual.

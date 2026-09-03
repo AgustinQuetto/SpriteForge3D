@@ -1,4 +1,5 @@
 import { QuadFactory } from '../editor/QuadFactory.js';
+import { cloneVoxelState } from '../editor/PixelUtils.js';
 
 /**
  * PropertiesPanel — Shows selected object properties with transform inputs, 
@@ -10,21 +11,33 @@ export class PropertiesPanel {
     this.body = document.getElementById('properties-body');
     this.currentMesh = null;
     this.onExtrusionChanged = null;
+    this.onPropertyChanged = null;
+    this.onVoxelizeChanged = null;
     this.onDuplicate = null;
     this.onDelete = null;
     this.onApplyTexture = null;
     this.onReliefExtract = null;
     this.onReliefSubtract = null;
+    this.onReliefSeparate = null;
     this.onReliefClearSelection = null;
     this.onReliefToleranceChanged = null;
     this.onReliefDepthStepChanged = null;
     this.onReliefActivateTool = null;
+    this.onReliefInteractionModeChanged = null;
     this.onReliefSelectionModeChanged = null;
     this.onReliefLoadHeightmap = null;
     this.onReliefApplyLuminance = null;
     this.onReliefClearHeightmap = null;
     this.onReliefHeightSettingsChanged = null;
+    this.onBrushActivateTool = null;
+    this.onBrushSizeChanged = null;
+    this.onBrushColorChanged = null;
+    this.onBrushModeChanged = null;
     this.reliefSelectionMode = 'wand';
+    this.reliefInteractionMode = 'direct';
+    this.brushSize = 1;
+    this.brushColor = '#6382ff';
+    this.brushMode = 'paint';
 
     this.showEmpty();
   }
@@ -41,13 +54,14 @@ export class PropertiesPanel {
     const pos = mesh.position;
     const rot = mesh.rotation;
     const scl = mesh.scale;
+    const isSceneGroup = !!mesh.userData?.isSceneGroup;
     const depth = mesh.userData.extrusionDepth || 0;
     const objType = mesh.userData.type || 'quad';
     const hasTexture = !!(mesh.userData.texture);
 
     // Show extrusion only for quads (flat planes that can be extruded)
-    const showExtrusion = (objType === 'quad' || objType === 'box');
-    const showVoxelRelief = objType === 'voxel';
+    const showExtrusion = !isSceneGroup && (objType === 'quad' || objType === 'box');
+    const showVoxelRelief = !isSceneGroup && objType === 'voxel';
     const selectedPixels = mesh.userData.voxelSelection
       ? mesh.userData.voxelSelection.reduce((n, v) => n + (v ? 1 : 0), 0)
       : 0;
@@ -62,6 +76,18 @@ export class PropertiesPanel {
         <div class="prop-section-title">Nombre</div>
         <input type="text" class="prop-input" id="prop-name" value="${mesh.name}" style="width:100%;margin-bottom:8px">
       </div>
+
+      ${isSceneGroup ? `
+      <div class="prop-section group-summary">
+        <div class="prop-section-title">Grupo</div>
+        <div style="font-size:12px;color:var(--text-secondary)">
+          ${mesh.children.length} objeto${mesh.children.length !== 1 ? 's' : ''} agrupado${mesh.children.length !== 1 ? 's' : ''}
+        </div>
+        <small style="display:block;margin-top:6px;color:var(--text-muted)">
+          Al exportar se incluir&aacute; &uacute;nicamente este grupo.
+        </small>
+      </div>
+      ` : ''}
 
       <details class="properties-advanced">
         <summary>Posición, rotación y escala</summary>
@@ -145,7 +171,52 @@ export class PropertiesPanel {
 
       ${showVoxelRelief ? `
       <div class="prop-section">
+        <div class="prop-section-title">Pixel Brush</div>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <button type="button" class="prop-btn relief-mode-btn ${this.brushMode === 'paint' ? 'active' : ''}" id="btn-brush-paint" style="flex:1;padding:6px 4px;font-size:11px">
+            <span class="material-symbols-rounded" style="font-size:16px">brush</span>
+            Pintar
+          </button>
+          <button type="button" class="prop-btn relief-mode-btn ${this.brushMode === 'erase' ? 'active' : ''}" id="btn-brush-erase" style="flex:1;padding:6px 4px;font-size:11px">
+            <span class="material-symbols-rounded" style="font-size:16px">ink_eraser</span>
+            Borrar
+          </button>
+        </div>
+        <div class="prop-slider-row">
+          <span class="prop-slider-label">Tamaño</span>
+          <input type="range" class="prop-slider" id="prop-brush-size" min="1" max="16" step="1" value="${this.brushSize}">
+          <input type="number" class="prop-input" id="prop-brush-size-num" min="1" max="16" step="1" value="${this.brushSize}" style="width:60px;margin-left:8px">
+        </div>
+        <div class="prop-row" style="margin-top:8px">
+          <span class="prop-label" style="width:52px">Color</span>
+          <input type="color" id="prop-brush-color" value="${this.brushColor}" style="width:42px;height:30px;padding:2px;border:1px solid var(--border);border-radius:5px;background:var(--bg-input);cursor:pointer">
+          <small style="color:var(--text-muted)">Click y arrastrá sobre el sprite</small>
+        </div>
+        <button class="prop-btn prop-btn-accent" id="btn-brush-activate" style="margin-top:8px;margin-bottom:12px">
+          <span class="material-symbols-rounded">brush</span>
+          Activar brush (V)
+        </button>
+
         <div class="prop-section-title">Voxel Relief (Relieve)</div>
+        <div class="relief-interaction-card">
+          <div class="relief-interaction-title">Modo de trabajo</div>
+          <div class="relief-interaction-row">
+            <button type="button" class="prop-btn relief-interaction-btn ${this.reliefInteractionMode === 'direct' ? 'active' : ''}" data-relief-interaction="direct">
+              <span class="material-symbols-rounded">open_in_full</span>
+              Relieve directo
+            </button>
+            <button type="button" class="prop-btn relief-interaction-btn ${this.reliefInteractionMode === 'select' ? 'active' : ''}" data-relief-interaction="select">
+              <span class="material-symbols-rounded">select_all</span>
+              Selección avanzada
+            </button>
+          </div>
+          <small class="relief-interaction-help" id="prop-relief-interaction-help">
+            ${this.reliefInteractionMode === 'direct'
+              ? 'Apuntá una cara voxel y arrastrá: arriba extrae, abajo sustrae.'
+              : 'Conserva Varita, Píxel y Área para seleccionar varias caras antes de aplicar profundidad.'}
+          </small>
+        </div>
+        <div id="relief-selection-controls" style="${this.reliefInteractionMode === 'select' ? '' : 'display:none'}">
         <div class="prop-section-title" style="margin-top:0;margin-bottom:6px;font-size:11px;color:var(--text-muted)">Selection mode</div>
         <div class="relief-mode-row" style="display:flex;gap:4px;margin-bottom:10px">
           <button type="button" class="prop-btn relief-mode-btn ${this._reliefModeActive('wand')}" data-relief-mode="wand" style="flex:1;padding:6px 4px;font-size:11px">
@@ -191,10 +262,15 @@ export class PropertiesPanel {
             Subtract (−)
           </button>
         </div>
+        <button class="prop-btn prop-btn-accent" id="btn-relief-separate" style="margin-bottom:6px" ${selectedPixels === 0 ? 'disabled' : ''}>
+          <span class="material-symbols-rounded">call_split</span>
+          Separar selección como pieza
+        </button>
         <button class="prop-btn" id="btn-relief-clear">
           <span class="material-symbols-rounded">deselect</span>
           Clear Selection
         </button>
+        </div>
         <div class="dropdown-divider" style="margin:12px 0;opacity:0.35"></div>
         <div class="prop-section-title" style="margin-bottom:6px">Heightmap (Mapa de grises)</div>
         <div style="margin-bottom:8px;font-size:12px;color:var(--text-secondary);word-break:break-all">
@@ -229,7 +305,7 @@ export class PropertiesPanel {
       </div>
       ` : ''}
 
-      <div class="prop-section">
+      ${!isSceneGroup ? `<div class="prop-section">
         <div class="prop-section-title">Textura</div>
         <div style="margin-bottom:8px;text-align:center;padding:6px;background:var(--bg-input);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary)">
           ${hasTexture ? `✓ ${mesh.userData.textureName || 'Aplicada'}` : 'Sin textura'}
@@ -242,8 +318,9 @@ export class PropertiesPanel {
           Elegí primero un sprite del panel izquierdo.
         </small>
       </div>
+      ` : ''}
 
-      ${hasTexture ? `
+      ${!isSceneGroup && hasTexture ? `
       <div class="prop-section">
         <div class="prop-section-title">Texture Mapping</div>
         <div class="prop-row">
@@ -262,6 +339,15 @@ export class PropertiesPanel {
           <span class="prop-label" style="width:40px">Offset Y</span>
           <input type="number" step="0.1" class="prop-input" id="prop-tex-oy" value="${(mesh.userData.uvOffset && mesh.userData.uvOffset[1] !== undefined) ? mesh.userData.uvOffset[1] : 0}">
         </div>
+        <div class="prop-row" style="margin-top:8px;display:block">
+          <label style="display:flex;align-items:flex-start;gap:6px;font-size:12px;cursor:pointer;color:var(--text-secondary)">
+            <input type="checkbox" id="prop-tex-repeat-scale" ${mesh.userData.textureRepeatOnScale ? 'checked' : ''}>
+            <span style="display:flex;flex-direction:column;gap:2px">
+              <strong style="color:var(--text-primary);font-weight:600">Repetir al redimensionar</strong>
+              <span style="font-size:11px;color:var(--text-muted)">Mantiene el tamaño visual de una textura seamless al escalar.</span>
+            </span>
+          </label>
+        </div>
       </div>
       ` : ''}
 
@@ -279,59 +365,135 @@ export class PropertiesPanel {
     `;
 
     this._bindInputs(mesh);
-    if (showVoxelRelief) this._bindReliefControls(mesh);
+    if (showVoxelRelief) {
+      this._bindBrushControls(mesh);
+      this._bindReliefControls(mesh);
+    }
+  }
+
+  _bindBrushControls(mesh) {
+    const sizeSlider = document.getElementById('prop-brush-size');
+    const sizeInput = document.getElementById('prop-brush-size-num');
+    const syncSize = (value) => {
+      this.brushSize = Math.max(1, Math.min(16, Math.round(Number(value) || 1)));
+      if (sizeSlider) sizeSlider.value = this.brushSize;
+      if (sizeInput) sizeInput.value = this.brushSize;
+      if (this.onBrushSizeChanged) this.onBrushSizeChanged(this.brushSize);
+    };
+
+    sizeSlider?.addEventListener('input', (e) => syncSize(e.target.value));
+    sizeInput?.addEventListener('change', (e) => syncSize(e.target.value));
+    this._on('prop-brush-color', 'input', (e) => {
+      this.brushColor = e.target.value;
+      if (this.onBrushColorChanged) this.onBrushColorChanged(this.brushColor);
+    });
+    this._on('btn-brush-paint', 'click', () => {
+      this.brushMode = 'paint';
+      if (this.onBrushModeChanged) this.onBrushModeChanged(this.brushMode);
+      this.showProperties(mesh);
+    });
+    this._on('btn-brush-erase', 'click', () => {
+      this.brushMode = 'erase';
+      if (this.onBrushModeChanged) this.onBrushModeChanged(this.brushMode);
+      this.showProperties(mesh);
+    });
+    this._on('btn-brush-activate', 'click', () => {
+      if (this.onBrushActivateTool) this.onBrushActivateTool(mesh);
+    });
   }
 
   _bindInputs(mesh) {
     // Name
-    this._on('prop-name', 'input', (e) => { mesh.name = e.target.value; });
+    const nameInput = document.getElementById('prop-name');
+    let nameBefore = mesh.name;
+    nameInput?.addEventListener('focus', () => { nameBefore = mesh.name; });
+    nameInput?.addEventListener('input', (e) => { mesh.name = e.target.value; });
+    nameInput?.addEventListener('change', () => {
+      const after = mesh.name;
+      this._emitPropertyChanged(mesh, 'name', nameBefore, after, 'Rename');
+      nameBefore = after;
+    });
 
     // Position
-    this._on('prop-px', 'change', (e) => { mesh.position.x = parseFloat(e.target.value) || 0; });
-    this._on('prop-py', 'change', (e) => { mesh.position.y = parseFloat(e.target.value) || 0; });
-    this._on('prop-pz', 'change', (e) => { mesh.position.z = parseFloat(e.target.value) || 0; });
+    const transformBefore = () => this._captureTransform(mesh);
+    const applyPosition = (axis, value) => {
+      const before = transformBefore();
+      mesh.position[axis] = value;
+      this._emitPropertyChanged(mesh, 'transform', before, transformBefore(), 'Transform');
+    };
+    this._on('prop-px', 'change', (e) => applyPosition('x', parseFloat(e.target.value) || 0));
+    this._on('prop-py', 'change', (e) => applyPosition('y', parseFloat(e.target.value) || 0));
+    this._on('prop-pz', 'change', (e) => applyPosition('z', parseFloat(e.target.value) || 0));
 
     // Rotation
-    this._on('prop-rx', 'change', (e) => { mesh.rotation.x = (parseFloat(e.target.value) || 0) * Math.PI / 180; });
-    this._on('prop-ry', 'change', (e) => { mesh.rotation.y = (parseFloat(e.target.value) || 0) * Math.PI / 180; });
-    this._on('prop-rz', 'change', (e) => { mesh.rotation.z = (parseFloat(e.target.value) || 0) * Math.PI / 180; });
+    const setRotation = (axis, value) => {
+      const before = transformBefore();
+      mesh.rotation[axis] = value;
+      this._emitPropertyChanged(mesh, 'transform', before, transformBefore(), 'Transform');
+    };
+    this._on('prop-rx', 'change', (e) => setRotation('x', (parseFloat(e.target.value) || 0) * Math.PI / 180));
+    this._on('prop-ry', 'change', (e) => setRotation('y', (parseFloat(e.target.value) || 0) * Math.PI / 180));
+    this._on('prop-rz', 'change', (e) => setRotation('z', (parseFloat(e.target.value) || 0) * Math.PI / 180));
 
     // Scale
-    this._on('prop-sx', 'change', (e) => { mesh.scale.x = parseFloat(e.target.value) || 1; });
-    this._on('prop-sy', 'change', (e) => { mesh.scale.y = parseFloat(e.target.value) || 1; });
-    this._on('prop-sz', 'change', (e) => { mesh.scale.z = parseFloat(e.target.value) || 1; });
+    const setScale = (axis, value) => {
+      const before = transformBefore();
+      mesh.scale[axis] = value;
+      this._emitPropertyChanged(mesh, 'transform', before, transformBefore(), 'Transform');
+    };
+    this._on('prop-sx', 'change', (e) => setScale('x', parseFloat(e.target.value) || 1));
+    this._on('prop-sy', 'change', (e) => setScale('y', parseFloat(e.target.value) || 1));
+    this._on('prop-sz', 'change', (e) => setScale('z', parseFloat(e.target.value) || 1));
 
     // Extrusion slider & numeric input
     const slider = document.getElementById('prop-extrude');
     const numInput = document.getElementById('prop-extrude-num');
     const texSidesCheckbox = document.getElementById('prop-texture-sides');
+    let extrusionBefore = this._captureExtrusion(mesh, texSidesCheckbox);
 
     const applyExtrusion = (newDepth) => {
       const textureSides = texSidesCheckbox ? texSidesCheckbox.checked : true;
       QuadFactory.extrudeQuad(mesh, newDepth, textureSides);
-      if (this.onExtrusionChanged) this.onExtrusionChanged(mesh, newDepth);
+    };
+
+    const beginExtrusionEdit = () => {
+      extrusionBefore = this._captureExtrusion(mesh, texSidesCheckbox);
+    };
+    const commitExtrusionEdit = () => {
+      const after = this._captureExtrusion(mesh, texSidesCheckbox);
+      this._emitPropertyChanged(mesh, 'extrusion', extrusionBefore, after, 'Extrusion');
+      extrusionBefore = after;
+      if (this.onExtrusionChanged) this.onExtrusionChanged(mesh, after.depth);
     };
 
     if (slider) {
+      slider.addEventListener('focus', beginExtrusionEdit);
+      slider.addEventListener('pointerdown', beginExtrusionEdit);
       slider.addEventListener('input', (e) => {
         const val = parseFloat(e.target.value) || 0;
         if (numInput) numInput.value = val.toFixed(1);
         applyExtrusion(val);
       });
+      slider.addEventListener('change', commitExtrusionEdit);
     }
 
     if (numInput) {
+      numInput.addEventListener('focus', beginExtrusionEdit);
       numInput.addEventListener('change', (e) => {
         const val = Math.max(0, parseFloat(e.target.value) || 0);
         if (slider) slider.value = Math.min(128, val);
         applyExtrusion(val);
+        commitExtrusionEdit();
       });
     }
 
     if (texSidesCheckbox) {
+      texSidesCheckbox.addEventListener('focus', beginExtrusionEdit);
+      texSidesCheckbox.addEventListener('pointerdown', beginExtrusionEdit);
       texSidesCheckbox.addEventListener('change', () => {
         const d = mesh.userData.extrusionDepth || 0;
         applyExtrusion(d);
+        commitExtrusionEdit();
       });
     }
 
@@ -339,6 +501,8 @@ export class PropertiesPanel {
     const voxelizeCheckbox = document.getElementById('prop-voxelize');
     if (voxelizeCheckbox) {
       voxelizeCheckbox.addEventListener('change', (e) => {
+        const wasVoxelized = !!mesh.userData.voxelized;
+        const beforeVoxelState = cloneVoxelState(mesh);
         if (e.target.checked) {
           QuadFactory.voxelizeSprite(mesh);
           if (slider) slider.disabled = true;
@@ -350,7 +514,9 @@ export class PropertiesPanel {
           if (numInput) numInput.disabled = false;
           if (texSidesCheckbox) texSidesCheckbox.disabled = false;
         }
-        if (this.onVoxelizeChanged) this.onVoxelizeChanged(mesh, e.target.checked);
+        if (this.onVoxelizeChanged) {
+          this.onVoxelizeChanged(mesh, e.target.checked, wasVoxelized, beforeVoxelState);
+        }
         this.showProperties(mesh);
       });
     }
@@ -362,6 +528,11 @@ export class PropertiesPanel {
 
     // Texture Mapping
     const updateTextureMapping = () => {
+      const before = {
+        repeat: [...(mesh.userData.uvRepeat || [1, 1])],
+        offset: [...(mesh.userData.uvOffset || [0, 0])],
+        baseUV: [...(mesh.userData.textureRepeatBaseUV || mesh.userData.uvRepeat || [1, 1])],
+      };
       const rx = parseFloat(document.getElementById('prop-tex-rx')?.value ?? 1);
       const ry = parseFloat(document.getElementById('prop-tex-ry')?.value ?? 1);
       const ox = parseFloat(document.getElementById('prop-tex-ox')?.value ?? 0);
@@ -369,6 +540,14 @@ export class PropertiesPanel {
 
       mesh.userData.uvRepeat = [rx, ry];
       mesh.userData.uvOffset = [ox, oy];
+
+      if (mesh.userData.textureRepeatOnScale) {
+        const baseScale = mesh.userData.textureRepeatBaseScale || [mesh.scale.x, mesh.scale.y];
+        mesh.userData.textureRepeatBaseUV = [
+          rx / Math.abs(mesh.scale.x / (baseScale[0] || 1)),
+          ry / Math.abs(mesh.scale.y / (baseScale[1] || 1)),
+        ];
+      }
 
       const applyMappingToMaterial = (mat) => {
         if (mat && mat.map) {
@@ -383,12 +562,44 @@ export class PropertiesPanel {
       } else {
         applyMappingToMaterial(mesh.material);
       }
+
+      this._emitPropertyChanged(mesh, 'mapping', before, {
+        repeat: [...mesh.userData.uvRepeat],
+        offset: [...mesh.userData.uvOffset],
+        baseUV: [...(mesh.userData.textureRepeatBaseUV || [1, 1])],
+      }, 'Texture Mapping');
     };
 
     this._on('prop-tex-rx', 'change', updateTextureMapping);
     this._on('prop-tex-ry', 'change', updateTextureMapping);
     this._on('prop-tex-ox', 'change', updateTextureMapping);
     this._on('prop-tex-oy', 'change', updateTextureMapping);
+
+    const repeatOnScaleCheckbox = document.getElementById('prop-tex-repeat-scale');
+    if (repeatOnScaleCheckbox) {
+      repeatOnScaleCheckbox.addEventListener('change', (e) => {
+        const before = {
+          enabled: !!mesh.userData.textureRepeatOnScale,
+          baseScale: [...(mesh.userData.textureRepeatBaseScale || [mesh.scale.x, mesh.scale.y])],
+          baseUV: [...(mesh.userData.textureRepeatBaseUV || mesh.userData.uvRepeat || [1, 1])],
+          repeat: [...(mesh.userData.uvRepeat || [1, 1])],
+        };
+
+        mesh.userData.textureRepeatOnScale = e.target.checked;
+        if (e.target.checked) {
+          mesh.userData.textureRepeatBaseScale = [mesh.scale.x, mesh.scale.y];
+          mesh.userData.textureRepeatBaseUV = [...(mesh.userData.uvRepeat || [1, 1])];
+        }
+
+        const after = {
+          enabled: !!mesh.userData.textureRepeatOnScale,
+          baseScale: [...(mesh.userData.textureRepeatBaseScale || [mesh.scale.x, mesh.scale.y])],
+          baseUV: [...(mesh.userData.textureRepeatBaseUV || mesh.userData.uvRepeat || [1, 1])],
+          repeat: [...(mesh.userData.uvRepeat || [1, 1])],
+        };
+        this._emitPropertyChanged(mesh, 'repeat-scale', before, after, 'Texture Scale Mode');
+      });
+    }
 
     // Duplicate
     this._on('btn-duplicate', 'click', () => {
@@ -407,6 +618,23 @@ export class PropertiesPanel {
     const stepSlider = document.getElementById('prop-relief-depth-step');
     const stepNum = document.getElementById('prop-relief-depth-step-num');
     const tolRow = document.getElementById('prop-relief-tolerance-row');
+    const selectionControls = document.getElementById('relief-selection-controls');
+
+    document.querySelectorAll('.relief-interaction-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.reliefInteraction === 'select' ? 'select' : 'direct';
+        this.reliefInteractionMode = mode;
+        document.querySelectorAll('.relief-interaction-btn').forEach(b => b.classList.toggle('active', b === btn));
+        if (selectionControls) selectionControls.style.display = mode === 'select' ? '' : 'none';
+        const help = document.getElementById('prop-relief-interaction-help');
+        if (help) {
+          help.textContent = mode === 'direct'
+            ? 'Apuntá una cara voxel y arrastrá: arriba extrae, abajo sustrae.'
+            : 'Conserva Varita, Píxel y Área para seleccionar varias caras antes de aplicar profundidad.';
+        }
+        if (this.onReliefInteractionModeChanged) this.onReliefInteractionModeChanged(mode);
+      });
+    });
 
     if (tolRow) {
       tolRow.style.display = this.reliefSelectionMode === 'wand' ? '' : 'none';
@@ -462,6 +690,9 @@ export class PropertiesPanel {
     });
     this._on('btn-relief-subtract', 'click', () => {
       if (this.onReliefSubtract) this.onReliefSubtract(mesh);
+    });
+    this._on('btn-relief-separate', 'click', () => {
+      if (this.onReliefSeparate) this.onReliefSeparate(mesh);
     });
     this._on('btn-relief-clear', 'click', () => {
       if (this.onReliefClearSelection) this.onReliefClearSelection(mesh);
@@ -524,6 +755,26 @@ export class PropertiesPanel {
     return 'Varita: click selecciona píxeles similares. Shift+click suma, Alt+click quita.';
   }
 
+  _captureTransform(mesh) {
+    return {
+      position: [mesh.position.x, mesh.position.y, mesh.position.z],
+      rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+      scale: [mesh.scale.x, mesh.scale.y, mesh.scale.z],
+    };
+  }
+
+  _captureExtrusion(mesh, sidesCheckbox = null) {
+    return {
+      depth: mesh.userData.extrusionDepth || 0,
+      textureSides: sidesCheckbox ? sidesCheckbox.checked : mesh.userData.textureSides !== false,
+    };
+  }
+
+  _emitPropertyChanged(mesh, kind, before, after, label) {
+    if (JSON.stringify(before) === JSON.stringify(after)) return;
+    if (this.onPropertyChanged) this.onPropertyChanged(mesh, { kind, before, after, label });
+  }
+
   _on(id, event, handler) {
     const el = document.getElementById(id);
     if (el) el.addEventListener(event, handler);
@@ -546,6 +797,10 @@ export class PropertiesPanel {
     setVal('prop-sx', mesh.scale.x.toFixed(3));
     setVal('prop-sy', mesh.scale.y.toFixed(3));
     setVal('prop-sz', mesh.scale.z.toFixed(3));
+    if (mesh.userData.textureRepeatOnScale) {
+      setVal('prop-tex-rx', (mesh.userData.uvRepeat?.[0] ?? 1).toFixed(3));
+      setVal('prop-tex-ry', (mesh.userData.uvRepeat?.[1] ?? 1).toFixed(3));
+    }
   }
 
   updateReliefSelectionCount(count) {
@@ -553,5 +808,7 @@ export class PropertiesPanel {
     if (el) {
       el.textContent = `${count} pixel${count !== 1 ? 's' : ''} selected`;
     }
+    const separateButton = document.getElementById('btn-relief-separate');
+    if (separateButton) separateButton.disabled = count === 0;
   }
 }

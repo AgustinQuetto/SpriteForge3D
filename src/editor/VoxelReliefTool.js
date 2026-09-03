@@ -4,7 +4,8 @@ import {
   countMask,
   ensureDepthMap,
   floodFill,
-  getImageDataFromMesh,
+  getVoxelPaintImageData,
+  getVoxelGridOrigin,
   hitToPixel,
   mergeSelection,
   pixelIndex,
@@ -21,6 +22,7 @@ export class VoxelReliefTool {
   constructor(sceneManager) {
     this.sceneManager = sceneManager;
     this.active = false;
+    this.interactionMode = 'direct';
     /** @type {ReliefSelectionMode} */
     this.selectionMode = 'wand';
     this.tolerance = 32;
@@ -38,9 +40,15 @@ export class VoxelReliefTool {
 
     /** @type {{ mesh: THREE.Mesh, startCol: number, startRow: number, additive: boolean } | null} */
     this._areaDrag = null;
+    /** @type {{ mesh: THREE.Mesh, pixel: { col: number, row: number }, localNormal: THREE.Vector3, startClientY: number, startDepth: number, currentDepth: number, pixelsPerLayer: number, speedMultiplier: number, selectionChanged: boolean } | null} */
+    this._directDrag = null;
+
+    this._faceHighlight = this._buildFaceHighlight();
+    sceneManager.scene.add(this._faceHighlight);
 
     this.onSelectionChanged = null;
     this.onDepthApplied = null;
+    this.onHoverChanged = null;
   }
 
   activate(mesh = null) {
@@ -55,8 +63,11 @@ export class VoxelReliefTool {
   deactivate() {
     this.active = false;
     this._areaDrag = null;
+    this._directDrag = null;
+    this.sceneManager.orbit.enabled = true;
     this._clearOverlay();
     this._clearPreview();
+    this._clearFaceHighlight();
   }
 
   setTargetMesh(mesh) {
@@ -68,6 +79,15 @@ export class VoxelReliefTool {
       ensureDepthMap(this.targetMesh);
       this._rebuildOverlay(this.targetMesh);
     }
+  }
+
+  setInteractionMode(mode) {
+    this.interactionMode = mode === 'select' ? 'select' : 'direct';
+    this._areaDrag = null;
+    this._directDrag = null;
+    this.sceneManager.orbit.enabled = true;
+    this._clearPreview();
+    if (this.interactionMode !== 'direct') this._clearFaceHighlight();
   }
 
   setSelectionMode(mode) {
@@ -84,6 +104,10 @@ export class VoxelReliefTool {
 
   setDepthStep(value) {
     this.depthStep = Math.max(1, Math.min(32, value | 0));
+  }
+
+  pickFace(clientX, clientY) {
+    return this._pickVoxelHit(clientX, clientY);
   }
 
   /**
@@ -109,7 +133,106 @@ export class VoxelReliefTool {
     const pixel = hitToPixel(mesh, hit.point);
     if (!pixel) return null;
 
-    return { mesh, pixel, hit };
+    const localNormal = hit.face?.normal?.clone() || new THREE.Vector3(0, 0, 1);
+    return { mesh, pixel, hit, localNormal };
+  }
+
+  _buildFaceHighlight() {
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xffc857,
+      transparent: true,
+      opacity: 0.72,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+    });
+    const face = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+    face.name = 'VoxelReliefFaceHighlight';
+    face.renderOrder = 1001;
+    face.visible = false;
+    face.userData.isEditorHelper = true;
+    return face;
+  }
+
+  _clearFaceHighlight() {
+    this._faceHighlight.visible = false;
+    if (this.onHoverChanged) this.onHoverChanged(null);
+  }
+
+  _updateFaceHighlight(pick) {
+    if (this.interactionMode !== 'direct' || !pick?.mesh || !pick.hit) {
+      this._clearFaceHighlight();
+      return;
+    }
+
+    const mesh = pick.mesh;
+    const pixelSize = mesh.userData.voxelPixelSize || 1;
+    const normal = pick.localNormal.clone().transformDirection(mesh.matrixWorld).normalize();
+    this._faceHighlight.scale.set(pixelSize * 1.08, pixelSize * 1.08, 1);
+    this._faceHighlight.position.copy(pick.hit.point).addScaledVector(normal, pixelSize * 0.035);
+    this._faceHighlight.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+    this._faceHighlight.visible = true;
+
+    if (this.onHoverChanged) {
+      const width = mesh.userData.voxelImageWidth || 1;
+      const pi = pick.pixel.row * width + pick.pixel.col;
+      this.onHoverChanged({
+        mesh,
+        pixel: pick.pixel,
+        depth: mesh.userData.voxelDepthMap?.[pi] || 0,
+        dragging: !!this._directDrag,
+      });
+    }
+  }
+
+  _pixelsPerLayer(mesh) {
+    const camera = this.sceneManager.camera;
+    const canvas = this.sceneManager.canvas;
+    const distance = camera.position.distanceTo(this.sceneManager.orbit.target);
+    let worldPerPixel;
+    if (camera.isPerspectiveCamera) {
+      const fov = THREE.MathUtils.degToRad(camera.fov);
+      worldPerPixel = (2 * Math.tan(fov / 2) * distance) / Math.max(1, canvas.clientHeight);
+    } else {
+      worldPerPixel = (camera.top - camera.bottom) / Math.max(1, canvas.clientHeight);
+    }
+    return Math.max(2, (mesh.userData.voxelPixelSize || 1) / Math.max(worldPerPixel, 0.0001));
+  }
+
+  _selectDirectFace(mesh, pixel) {
+    const paintData = ensureDepthMap(mesh);
+    if (!paintData) return false;
+    const index = pixel.row * paintData.width + pixel.col;
+    const wasSelected = paintData.selection[index] === 1 && countMask(paintData.selection) === 1;
+    paintData.selection.fill(0);
+    paintData.selection[index] = 1;
+    this.targetMesh = mesh;
+    this._rebuildOverlay(mesh);
+    if (!wasSelected && this.onSelectionChanged) this.onSelectionChanged(mesh, 1);
+    return !wasSelected;
+  }
+
+  _updateDirectDrag(clientX, clientY) {
+    const drag = this._directDrag;
+    if (!drag) return false;
+
+    const layerDelta = Math.round((drag.startClientY - clientY) / drag.pixelsPerLayer) * drag.speedMultiplier;
+    const nextDepth = Math.max(0, Math.min(this.maxDepth, drag.startDepth + layerDelta));
+    if (nextDepth !== drag.currentDepth) {
+      const delta = nextDepth - drag.currentDepth;
+      if (QuadFactory.applyVoxelDepthDelta(drag.mesh, delta, this.maxDepth)) {
+        drag.currentDepth = nextDepth;
+        this._rebuildOverlay(drag.mesh);
+      }
+    }
+
+    const pick = this._pickVoxelHit(clientX, clientY);
+    if (pick?.mesh === drag.mesh && pick.pixel.col === drag.pixel.col && pick.pixel.row === drag.pixel.row) {
+      this._updateFaceHighlight(pick);
+    } else if (this.onHoverChanged) {
+      this.onHoverChanged({ mesh: drag.mesh, pixel: drag.pixel, depth: drag.currentDepth, dragging: true });
+    }
+    return true;
   }
 
   /**
@@ -140,7 +263,7 @@ export class VoxelReliefTool {
     if (!pick) return null;
 
     const { mesh, pixel } = pick;
-    const imageData = getImageDataFromMesh(mesh);
+    const imageData = getVoxelPaintImageData(mesh);
     if (!imageData) return null;
 
     const { data, width, height } = imageData;
@@ -160,7 +283,34 @@ export class VoxelReliefTool {
   }
 
   onMouseDown(clientX, clientY, { shiftKey = false } = {}) {
-    if (!this.active || this.selectionMode !== 'area') return false;
+    if (!this.active) return false;
+
+    if (this.interactionMode === 'direct') {
+      const pick = this._pickVoxelHit(clientX, clientY);
+      if (!pick) return false;
+
+      const paintData = ensureDepthMap(pick.mesh);
+      const index = paintData ? pick.pixel.row * paintData.width + pick.pixel.col : -1;
+      if (!paintData || index < 0) return false;
+
+      const selectionChanged = this._selectDirectFace(pick.mesh, pick.pixel);
+      this._directDrag = {
+        mesh: pick.mesh,
+        pixel: pick.pixel,
+        localNormal: pick.localNormal,
+        startClientY: clientY,
+        startDepth: paintData.depthMap[index] || 0,
+        currentDepth: paintData.depthMap[index] || 0,
+        pixelsPerLayer: this._pixelsPerLayer(pick.mesh),
+        speedMultiplier: shiftKey ? 2 : 1,
+        selectionChanged,
+      };
+      this.sceneManager.orbit.enabled = false;
+      this._updateFaceHighlight(pick);
+      return true;
+    }
+
+    if (this.selectionMode !== 'area') return false;
 
     const pick = this._pickVoxelHit(clientX, clientY);
     if (!pick) return false;
@@ -179,7 +329,32 @@ export class VoxelReliefTool {
   }
 
   onMouseMove(clientX, clientY) {
-    if (!this.active || !this._areaDrag) return false;
+    if (!this.active) return false;
+
+    if (this.interactionMode === 'direct') {
+      if (this._directDrag) {
+        this._updateDirectDrag(clientX, clientY);
+        return {
+          mesh: this._directDrag.mesh,
+          pixel: this._directDrag.pixel,
+          depth: this._directDrag.currentDepth,
+          dragging: true,
+        };
+      }
+      const pick = this._pickVoxelHit(clientX, clientY);
+      this._updateFaceHighlight(pick);
+      if (!pick) return null;
+      const width = pick.mesh.userData.voxelImageWidth || 1;
+      const pi = pick.pixel.row * width + pick.pixel.col;
+      return {
+        mesh: pick.mesh,
+        pixel: pick.pixel,
+        depth: pick.mesh.userData.voxelDepthMap?.[pi] || 0,
+        dragging: false,
+      };
+    }
+
+    if (!this._areaDrag) return false;
 
     const pick = this._pickVoxelHit(clientX, clientY);
     if (!pick || pick.mesh !== this._areaDrag.mesh) {
@@ -192,6 +367,22 @@ export class VoxelReliefTool {
   }
 
   onMouseUp(clientX, clientY) {
+    if (this._directDrag) {
+      const drag = this._directDrag;
+      this._updateDirectDrag(clientX, clientY);
+      this._directDrag = null;
+      this.sceneManager.orbit.enabled = true;
+      const changedDepth = drag.currentDepth !== drag.startDepth;
+      if (!changedDepth && !drag.selectionChanged) return null;
+      return {
+        mesh: drag.mesh,
+        pixel: drag.pixel,
+        prevDepth: drag.startDepth,
+        newDepth: drag.currentDepth,
+        changedDepth,
+      };
+    }
+
     if (!this._areaDrag) return null;
 
     const { mesh, startCol, startRow, additive } = this._areaDrag;
@@ -203,7 +394,7 @@ export class VoxelReliefTool {
     const endCol = pick?.mesh === mesh ? pick.pixel.col : startCol;
     const endRow = pick?.mesh === mesh ? pick.pixel.row : startRow;
 
-    const imageData = getImageDataFromMesh(mesh);
+    const imageData = getVoxelPaintImageData(mesh);
     if (!imageData) return null;
 
     const { data, width, height } = imageData;
@@ -250,7 +441,7 @@ export class VoxelReliefTool {
     if (!this._areaDrag) return;
 
     const { mesh, startCol, startRow } = this._areaDrag;
-    const imageData = getImageDataFromMesh(mesh);
+    const imageData = getVoxelPaintImageData(mesh);
     if (!imageData) return;
 
     const { data, width, height } = imageData;
@@ -262,15 +453,14 @@ export class VoxelReliefTool {
     this._clearPreview();
     if (!previewMask) return;
 
-    const imageData = getImageDataFromMesh(mesh);
+    const imageData = getVoxelPaintImageData(mesh);
     if (!imageData) return;
 
     const { width, height } = imageData;
     const pixelSize = mesh.userData.voxelPixelSize || 1;
     const depthMap = mesh.userData.voxelDepthMap;
 
-    const originX = -width * pixelSize / 2 + pixelSize / 2;
-    const originY = pixelSize / 2;
+    const { x: originX, y: originY } = getVoxelGridOrigin(mesh, width, height);
 
     const mat = new THREE.MeshBasicMaterial({
       color: 0xffc857,
@@ -311,7 +501,7 @@ export class VoxelReliefTool {
     this._clearOverlay();
     if (!mesh?.userData?.voxelSelection) return;
 
-    const imageData = getImageDataFromMesh(mesh);
+    const imageData = getVoxelPaintImageData(mesh);
     if (!imageData) return;
 
     const { width, height } = imageData;
@@ -319,8 +509,7 @@ export class VoxelReliefTool {
     const depthMap = mesh.userData.voxelDepthMap;
     const selection = mesh.userData.voxelSelection;
 
-    const originX = -width * pixelSize / 2 + pixelSize / 2;
-    const originY = pixelSize / 2;
+    const { x: originX, y: originY } = getVoxelGridOrigin(mesh, width, height);
 
     const mat = new THREE.MeshBasicMaterial({
       color: 0x6382ff,
@@ -380,5 +569,8 @@ export class VoxelReliefTool {
     this._clearPreview();
     this.sceneManager.scene.remove(this._overlayGroup);
     this.sceneManager.scene.remove(this._previewGroup);
+    this.sceneManager.scene.remove(this._faceHighlight);
+    this._faceHighlight.geometry.dispose();
+    this._faceHighlight.material.dispose();
   }
 }

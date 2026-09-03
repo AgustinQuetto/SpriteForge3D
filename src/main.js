@@ -7,15 +7,31 @@ import { PropertiesPanel } from './ui/PropertiesPanel.js';
 import { SceneHierarchy } from './ui/SceneHierarchy.js';
 import { GLTFExportManager } from './export/GLTFExportManager.js';
 import { OBJExportManager } from './export/OBJExportManager.js';
+import { FBXExportManager } from './export/FBXExportManager.js';
 import { GodotExportManager } from './export/GodotExportManager.js';
+import { UnrealExportManager } from './export/UnrealExportManager.js';
+import { createExportScope } from './export/ExportScope.js';
 import { VertexEditor } from './editor/VertexEditor.js';
 import { UVExporter } from './export/UVExporter.js';
 import { DrawingTool } from './editor/DrawingTool.js';
 import { PushPullTool } from './editor/PushPullTool.js';
 import { CutTool } from './editor/CutTool.js';
 import { VoxelReliefTool } from './editor/VoxelReliefTool.js';
-import { cloneVoxelState, restoreVoxelState, countMask, loadImageFromFile } from './editor/PixelUtils.js';
+import { VoxelBrushTool } from './editor/VoxelBrushTool.js';
+import {
+  cloneVoxelState,
+  restoreVoxelState,
+  countMask,
+  loadImageFromFile,
+  splitVoxelStateBySelection,
+} from './editor/PixelUtils.js';
 import { createVoxelMesh } from './import/VoxelJSONLoader.js';
+import {
+  MODEL_ACCEPT,
+  MODEL_EXTENSIONS,
+  importModelFile,
+  importModelSource,
+} from './import/ModelImporter.js';
 
 // ──────────────────────────────────────────────
 //  Initialize Systems
@@ -29,6 +45,59 @@ const propsPanel = new PropertiesPanel(scene);
 const hierarchy = new SceneHierarchy(scene);
 const vertexEditor = new VertexEditor(scene.scene);
 
+const AUTOSAVE_STORAGE_KEY = 'spriteforge3d.autosave.v1';
+let autosaveTimer = null;
+let isRestoringProject = false;
+
+function scheduleAutosave() {
+  if (isRestoringProject) return;
+  if (autosaveTimer) clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(() => {
+    autosaveTimer = null;
+    persistProjectSnapshot();
+  }, 350);
+}
+
+function persistProjectSnapshot(project = null) {
+  if (isRestoringProject) return;
+  try {
+    const snapshot = project || serializeProject();
+    snapshot.savedAt = Date.now();
+    localStorage.setItem(AUTOSAVE_STORAGE_KEY, JSON.stringify(snapshot));
+  } catch (err) {
+    // localStorage can be unavailable or full (for example with very large sprites).
+    console.warn('Could not autosave project:', err);
+  }
+}
+
+function flushAutosave() {
+  if (autosaveTimer) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+  }
+  persistProjectSnapshot();
+}
+
+// History is the common mutation boundary for most editor operations.
+// Wrapping it keeps autosave in sync with undo/redo as well.
+const originalHistoryPush = history.push.bind(history);
+history.push = (action) => {
+  originalHistoryPush(action);
+  scheduleAutosave();
+};
+const originalHistoryUndo = history.undo.bind(history);
+history.undo = () => {
+  const action = originalHistoryUndo();
+  if (action) scheduleAutosave();
+  return action;
+};
+const originalHistoryRedo = history.redo.bind(history);
+history.redo = () => {
+  const action = originalHistoryRedo();
+  if (action) scheduleAutosave();
+  return action;
+};
+
 let activeTransformMode = 'translate';
 let isVertexEditMode = false;
 
@@ -37,15 +106,240 @@ const drawingTool = new DrawingTool(scene);
 const pushPullTool = new PushPullTool(scene);
 const cutTool = new CutTool(scene);
 const voxelReliefTool = new VoxelReliefTool(scene);
+const voxelBrushTool = new VoxelBrushTool(scene);
 
-// Current tool mode: 'transform' | 'line' | 'rectangle' | 'push-pull' | 'cut' | 'voxel-relief'
+// Current tool mode: 'transform' | 'line' | 'rectangle' | 'push-pull' | 'cut' | 'voxel-relief' | 'voxel-brush' | 'reference'
 let toolMode = 'transform';
 let reliefAreaDragged = false;
+let reliefDirectSnapshot = null;
+let brushStrokeSnapshot = null;
+let transformGestureSnapshot = null;
+let vertexGestureSnapshot = null;
+let reliefSelectionSnapshot = null;
+
+function captureTransformSnapshot(objects) {
+  return (objects || []).map(mesh => ({
+    mesh,
+    matrix: mesh.matrixWorld.clone(),
+  }));
+}
+
+function restoreTransformSnapshot(snapshot) {
+  for (const state of snapshot || []) {
+    if (!state.mesh) continue;
+    const mesh = state.mesh;
+    if (state.matrix) {
+      mesh.parent?.updateMatrixWorld(true);
+      const parentInverse = mesh.parent
+        ? mesh.parent.matrixWorld.clone().invert()
+        : new THREE.Matrix4().identity();
+      const localMatrix = parentInverse.multiply(state.matrix);
+      localMatrix.decompose(mesh.position, mesh.quaternion, mesh.scale);
+    } else {
+      mesh.position.set(...state.position);
+      mesh.rotation.set(...state.rotation);
+      mesh.scale.set(...state.scale);
+    }
+    state.mesh.updateMatrixWorld(true);
+    updateTextureRepeatForScale(state.mesh);
+  }
+  if (scene.selectedObjects.length === 1) propsPanel.updateFromTransform(scene.selectedObjects[0]);
+}
+
+function transformSnapshotsDiffer(before, after) {
+  if (!before || before.length !== after.length) return true;
+  return before.some((state, index) => {
+    const current = after[index];
+    if (state.mesh !== current.mesh) return true;
+    if (state.matrix && current.matrix) {
+      return state.matrix.elements.some((value, i) => value !== current.matrix.elements[i]);
+    }
+    return state.position.some((value, i) => value !== current.position[i])
+      || state.rotation.some((value, i) => value !== current.rotation[i])
+      || state.scale.some((value, i) => value !== current.scale[i]);
+  });
+}
+
+function pushTransformHistory(label, before, after) {
+  if (!transformSnapshotsDiffer(before, after)) return;
+  history.push({
+    label,
+    undo: () => restoreTransformSnapshot(before),
+    redo: () => restoreTransformSnapshot(after),
+  });
+}
+
+function applyTextureMapping(mesh, mapping) {
+  mesh.userData.uvRepeat = [...mapping.repeat];
+  mesh.userData.uvOffset = [...mapping.offset];
+  if (mapping.baseUV) mesh.userData.textureRepeatBaseUV = [...mapping.baseUV];
+  const apply = (mat) => {
+    if (!mat?.map) return;
+    mat.map.wrapS = THREE.RepeatWrapping;
+    mat.map.wrapT = THREE.RepeatWrapping;
+    mat.map.repeat.set(...mesh.userData.uvRepeat);
+    mat.map.offset.set(...mesh.userData.uvOffset);
+    mat.map.needsUpdate = true;
+  };
+  if (Array.isArray(mesh.material)) mesh.material.forEach(apply);
+  else apply(mesh.material);
+}
+
+function updateTextureRepeatForScale(mesh) {
+  const userData = mesh?.userData;
+  if (!userData?.textureRepeatOnScale) return;
+
+  const baseScale = userData.textureRepeatBaseScale || [mesh.scale.x, mesh.scale.y];
+  const baseUV = userData.textureRepeatBaseUV || userData.uvRepeat || [1, 1];
+  const scaleRatioX = Math.abs(mesh.scale.x / (baseScale[0] || 1));
+  const scaleRatioY = Math.abs(mesh.scale.y / (baseScale[1] || 1));
+
+  applyTextureMapping(mesh, {
+    repeat: [baseUV[0] * scaleRatioX, baseUV[1] * scaleRatioY],
+    offset: userData.uvOffset || [0, 0],
+  });
+}
+
+function restoreTextureRepeatState(mesh, state) {
+  const userData = mesh.userData;
+  userData.textureRepeatOnScale = !!state.enabled;
+  userData.textureRepeatBaseScale = [...(state.baseScale || [mesh.scale.x, mesh.scale.y])];
+  userData.textureRepeatBaseUV = [...(state.baseUV || state.repeat || userData.uvRepeat || [1, 1])];
+  applyTextureMapping(mesh, {
+    repeat: state.repeat || userData.uvRepeat || [1, 1],
+    offset: userData.uvOffset || [0, 0],
+  });
+}
+
+function cloneMaterials(material) {
+  const clone = (source) => {
+    const copy = source?.clone();
+    if (copy?.map) copy.map = copy.map.clone();
+    return copy;
+  };
+  return Array.isArray(material) ? material.map(clone) : clone(material);
+}
+
+function captureMeshAppearance(mesh) {
+  return {
+    geometry: mesh.geometry?.clone(),
+    material: cloneMaterials(mesh.material),
+    realUVApplied: !!mesh.userData.realUVApplied,
+    uvLayoutType: mesh.userData.uvLayoutType || '',
+    texture: mesh.userData.texture || null,
+    textureName: mesh.userData.textureName || '',
+    type: mesh.userData.type,
+    extrusionDepth: mesh.userData.extrusionDepth || 0,
+    textureSides: mesh.userData.textureSides !== false,
+    uvRepeat: [...(mesh.userData.uvRepeat || [1, 1])],
+    uvOffset: [...(mesh.userData.uvOffset || [0, 0])],
+  };
+}
+
+function restoreMeshAppearance(mesh, snapshot) {
+  mesh.geometry?.dispose();
+  if (Array.isArray(mesh.material)) mesh.material.forEach(material => material?.dispose());
+  else mesh.material?.dispose();
+  mesh.geometry = snapshot.geometry?.clone();
+  mesh.material = cloneMaterials(snapshot.material);
+  mesh.userData.realUVApplied = snapshot.realUVApplied;
+  mesh.userData.uvLayoutType = snapshot.uvLayoutType;
+  mesh.userData.texture = snapshot.texture;
+  mesh.userData.textureName = snapshot.textureName;
+  mesh.userData.type = snapshot.type;
+  mesh.userData.extrusionDepth = snapshot.extrusionDepth;
+  mesh.userData.textureSides = snapshot.textureSides;
+  mesh.userData.uvRepeat = [...snapshot.uvRepeat];
+  mesh.userData.uvOffset = [...snapshot.uvOffset];
+  propsPanel.showProperties(mesh);
+}
+
+function pushAppearanceHistory(mesh, label, before, after) {
+  history.push({
+    label,
+    undo: () => restoreMeshAppearance(mesh, before),
+    redo: () => restoreMeshAppearance(mesh, after),
+  });
+}
+
+function pushVoxelStateHistory(mesh, label, before, after) {
+  history.push({
+    label,
+    undo: () => {
+      restoreVoxelState(mesh, before);
+      QuadFactory.rebuildVoxelGeometry(mesh);
+      voxelReliefTool.updateSelectionOverlay(mesh);
+      propsPanel.showProperties(mesh);
+      hierarchy.refresh();
+    },
+    redo: () => {
+      restoreVoxelState(mesh, after);
+      QuadFactory.rebuildVoxelGeometry(mesh);
+      voxelReliefTool.updateSelectionOverlay(mesh);
+      propsPanel.showProperties(mesh);
+      hierarchy.refresh();
+    },
+  });
+}
+
+function applyExtrusionState(mesh, state) {
+  QuadFactory.extrudeQuad(mesh, state.depth, state.textureSides);
+  propsPanel.showProperties(mesh);
+}
+
+function restoreVoxelizedState(mesh, enabled, state) {
+  if (enabled) {
+    if (!mesh.userData.voxelized) QuadFactory.voxelizeSprite(mesh, mesh.userData.voxelPixelSize || 1);
+    restoreVoxelState(mesh, state || {});
+    QuadFactory.rebuildVoxelGeometry(mesh);
+  } else if (mesh.userData.voxelized) {
+    QuadFactory.devoxelizeSprite(mesh);
+  }
+  propsPanel.showProperties(mesh);
+  voxelReliefTool.updateSelectionOverlay(mesh);
+}
+
+function voxelizeWithHistory(mesh) {
+  if (!mesh || mesh.userData.voxelized || !mesh.userData.texture) return false;
+  const before = cloneVoxelState(mesh);
+  const wasVoxelized = !!mesh.userData.voxelized;
+  QuadFactory.voxelizeSprite(mesh);
+  const after = cloneVoxelState(mesh);
+  history.push({
+    label: 'Voxelize Sprite',
+    undo: () => restoreVoxelizedState(mesh, wasVoxelized, before),
+    redo: () => restoreVoxelizedState(mesh, true, after),
+  });
+  propsPanel.showProperties(mesh);
+  return true;
+}
 
 function reliefModeLabel(mode) {
   if (mode === 'pixel') return 'Píxel';
   if (mode === 'area') return 'Área';
   return 'Varita';
+}
+
+function updateReliefFloatPanel(info = null) {
+  const panel = document.getElementById('relief-float-panel');
+  if (!panel) return;
+  const visible = toolMode === 'voxel-relief' && propsPanel.reliefInteractionMode === 'direct';
+  panel.hidden = !visible;
+  if (!visible) return;
+
+  const target = document.getElementById('relief-float-target');
+  const status = document.getElementById('relief-float-status');
+  if (!info) {
+    if (target) target.textContent = 'Apuntá a una cara voxel';
+    if (status) status.textContent = 'Hover para elegir una cara';
+    return;
+  }
+
+  const { mesh, pixel, depth = 0, dragging = false } = info;
+  if (target) target.textContent = mesh?.name || 'Cara voxel';
+  if (status) {
+    status.textContent = `${dragging ? 'Editando' : 'Cara'} · pixel ${pixel.col + 1}, ${pixel.row + 1} · profundidad ${depth}`;
+  }
 }
 
 function setToolMode(mode) {
@@ -56,12 +350,13 @@ function setToolMode(mode) {
   pushPullTool.deactivate();
   cutTool.deactivate();
   voxelReliefTool.deactivate();
+  voxelBrushTool.deactivate();
 
   const viewport = document.getElementById('viewport');
-  viewport.classList.remove('cursor-crosshair', 'cursor-push-pull', 'cursor-voxel-relief');
+  viewport.classList.remove('cursor-crosshair', 'cursor-push-pull', 'cursor-voxel-relief', 'cursor-voxel-relief-direct', 'cursor-voxel-brush');
 
   // Reset draw button active states
-  ['btn-tool-line', 'btn-tool-rectangle', 'btn-tool-push-pull', 'btn-tool-cut', 'btn-tool-voxel-relief'].forEach(id => {
+  ['btn-tool-line', 'btn-tool-rectangle', 'btn-tool-push-pull', 'btn-tool-cut', 'btn-tool-voxel-relief', 'btn-tool-voxel-brush', 'btn-tool-reference'].forEach(id => {
     document.getElementById(id)?.classList.remove('active');
   });
 
@@ -96,11 +391,34 @@ function setToolMode(mode) {
       ? scene.selectedObjects[0]
       : null;
     voxelReliefTool.activate(target);
+    voxelReliefTool.setInteractionMode(propsPanel.reliefInteractionMode);
     voxelReliefTool.setSelectionMode(propsPanel.reliefSelectionMode);
-    viewport.classList.add('cursor-voxel-relief');
+    viewport.classList.add(propsPanel.reliefInteractionMode === 'direct' ? 'cursor-voxel-relief-direct' : 'cursor-voxel-relief');
     document.getElementById('btn-tool-voxel-relief')?.classList.add('active');
     scene.orbit.enabled = true;
-    showToast(`Voxel Relief (${reliefModeLabel(propsPanel.reliefSelectionMode)}) — selecciona y usa Extract/Subtract`);
+    updateReliefFloatPanel();
+    showToast(target
+      ? (propsPanel.reliefInteractionMode === 'direct'
+        ? 'Relieve directo — apuntá una cara y arrastrá arriba/abajo'
+        : `Voxel Relief (${reliefModeLabel(propsPanel.reliefSelectionMode)}) — selecciona y usa Extract/Subtract`)
+      : 'Primero convertí el sprite en vóxeles desde Ajustes');
+  } else if (mode === 'voxel-brush') {
+    scene.transformControls.detach();
+    let target = scene.selectedObjects.length === 1 ? scene.selectedObjects[0] : null;
+    if (target && !target.userData.voxelized && target.userData.texture) {
+      voxelizeWithHistory(target);
+    }
+    target = target?.userData?.voxelized ? target : null;
+    voxelBrushTool.activate(target);
+    viewport.classList.add('cursor-voxel-brush');
+    document.getElementById('btn-tool-voxel-brush')?.classList.add('active');
+    scene.orbit.enabled = true;
+    if (target) showToast('Brush activo — click y arrastrá para pintar píxeles');
+    else showToast('Seleccioná un sprite voxelizado para usar el brush');
+  } else if (mode === 'reference') {
+    scene.transformControls.detach();
+    document.getElementById('btn-tool-reference')?.classList.add('active');
+    showToast('Elegí una imagen para colocarla como referencia');
   } else {
     // transform mode — re-attach gizmo to whatever is selected
     scene._updateTransformControls();
@@ -117,7 +435,7 @@ drawingTool.onFaceCreated = (mesh) => {
   history.push({
     label: 'Draw Face',
     undo: () => {
-      scene.removeObject(mesh);
+      scene.removeObject(mesh, { dispose: false });
       scene.deselectObject();
       hierarchy.refresh();
     },
@@ -139,7 +457,7 @@ cutTool.onCutComplete = (results) => {
   const originals = results.map(r => r.original);
   const pieces = results.flatMap(r => r.pieces);
 
-  originals.forEach(m => scene.removeObject(m));
+  originals.forEach(m => scene.removeObject(m, { dispose: false }));
   scene.deselectObject();
   pieces.forEach(m => {
     scene.addObject(m);
@@ -150,13 +468,13 @@ cutTool.onCutComplete = (results) => {
   history.push({
     label: 'Cut',
     undo: () => {
-      pieces.forEach(m => scene.removeObject(m));
+      pieces.forEach(m => scene.removeObject(m, { dispose: false }));
       scene.deselectObject();
       originals.forEach(m => scene.addObject(m));
       hierarchy.refresh();
     },
     redo: () => {
-      originals.forEach(m => scene.removeObject(m));
+      originals.forEach(m => scene.removeObject(m, { dispose: false }));
       scene.deselectObject();
       pieces.forEach(m => {
         scene.addObject(m);
@@ -181,21 +499,62 @@ scene.onSelectionChanged = (selection) => {
     if (toolMode === 'voxel-relief') {
       voxelReliefTool.setTargetMesh(selection[0].userData.voxelized ? selection[0] : null);
     }
+    if (toolMode === 'voxel-brush') {
+      voxelBrushTool.setTargetMesh(selection[0].userData.voxelized ? selection[0] : null);
+    }
   } else if (selection.length > 1) {
     propsPanel.showProperties({ name: `${selection.length} objects selected`, isMulti: true });
   } else {
     propsPanel.showEmpty();
   }
   hierarchy.refresh();
+  updateGroupingActions(selection);
+  updateExportScopeLabel();
   updateBeginnerGuide();
 };
 
 // When transform gizmo moves an object → update property inputs
 // When transform gizmo moves an object → update property inputs
+scene.onTransformStart = () => {
+  if (isVertexEditMode && vertexEditor.activeMesh) {
+    vertexGestureSnapshot = vertexEditor.captureGeometryState(vertexEditor.activeMesh);
+    return;
+  }
+  transformGestureSnapshot = captureTransformSnapshot(scene.selectedObjects);
+};
+
+scene.onTransformEnd = () => {
+  if (isVertexEditMode && vertexGestureSnapshot) {
+    const before = vertexGestureSnapshot;
+    const after = vertexEditor.captureGeometryState(before.mesh);
+    const changed = before.positions.some((value, index) => value !== after.positions[index]);
+    if (changed) {
+      history.push({
+        label: 'Edit Vertices',
+        undo: () => vertexEditor.restoreGeometryState(before),
+        redo: () => vertexEditor.restoreGeometryState(after),
+      });
+    }
+    vertexGestureSnapshot = null;
+    return;
+  }
+
+  if (transformGestureSnapshot) {
+    pushTransformHistory(
+      `${activeTransformMode[0].toUpperCase()}${activeTransformMode.slice(1)} Object`,
+      transformGestureSnapshot,
+      captureTransformSnapshot(scene.selectedObjects),
+    );
+    transformGestureSnapshot = null;
+  }
+};
+
 scene.onObjectChanged = () => {
+  scene.selectedObjects.forEach(updateTextureRepeatForScale);
   if (scene.selectedObjects.length === 1 && !isVertexEditMode) {
     propsPanel.updateFromTransform(scene.selectedObjects[0]);
   }
+  scheduleAutosave();
 };
 
 // When transform gizmo moves a vertex control point
@@ -205,8 +564,24 @@ scene.onVertexChanged = (controlPoint) => {
 
 // When user clicks an asset thumbnail → just highlights it
 assetPanel.onAssetSelected = (asset) => {
-  // Selected asset will be used when clicking on the canvas
+  if (toolMode === 'reference') {
+    placeReferenceImage(asset);
+    assetPanel.clearSelection();
+    setToolMode('transform');
+    showToast(`Referencia "${asset.name}" colocada`);
+  }
 };
+
+assetPanel.onModelSelected = async (asset) => {
+  const rect = canvas.getBoundingClientRect();
+  const worldPos = scene.getWorldPositionFromScreen(
+    rect.left + rect.width / 2,
+    rect.top + rect.height / 2,
+  );
+  await placeModelAsset(asset, worldPos);
+};
+
+assetPanel.onAssetsChanged = () => scheduleAutosave();
 
 // Importing from the beginner entry point is intentionally one-step: once a
 // PNG is loaded, place it in the center and make it ready to edit.
@@ -225,21 +600,90 @@ assetPanel.onAssetsImported = (assets) => {
   updateBeginnerGuide();
 };
 
+assetPanel.onModelFilesImported = async (files) => {
+  const rect = canvas.getBoundingClientRect();
+  const worldPos = scene.getWorldPositionFromScreen(
+    rect.left + rect.width / 2,
+    rect.top + rect.height / 2,
+  );
+  for (const file of files) {
+    await import3DFile(file, worldPos);
+  }
+};
+
 // Duplicate/delete from properties panel
 propsPanel.onDuplicate = (mesh) => duplicateSelected();
-propsPanel.onDelete = (mesh) => deleteSelected();
+propsPanel.onDelete = () => deleteSelected({ forceObjects: true });
 
-propsPanel.onReliefExtract = (mesh) => {
+propsPanel.onPropertyChanged = (mesh, change) => {
+  if (change.kind === 'transform') {
+    const scaleChanged = change.before.scale.some((value, index) => value !== change.after.scale[index]);
+    if (scaleChanged && scene.snapEnabled && scene.scaleSnapEnabled) {
+      scene.snapObjectScaleToGrid(mesh);
+      scene.snapObjectToGrid(mesh);
+    }
+
+    const after = scaleChanged && scene.snapEnabled && scene.scaleSnapEnabled
+      ? {
+          position: [mesh.position.x, mesh.position.y, mesh.position.z],
+          rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+          scale: [mesh.scale.x, mesh.scale.y, mesh.scale.z],
+        }
+      : change.after;
+    updateTextureRepeatForScale(mesh);
+    propsPanel.updateFromTransform(mesh);
+    pushTransformHistory('Transform Object', [{ mesh, ...change.before }], [{ mesh, ...after }]);
+  } else if (change.kind === 'name') {
+    history.push({
+      label: 'Rename Object',
+      undo: () => { mesh.name = change.before; hierarchy.refresh(); propsPanel.showProperties(mesh); },
+      redo: () => { mesh.name = change.after; hierarchy.refresh(); propsPanel.showProperties(mesh); },
+    });
+  } else if (change.kind === 'extrusion') {
+    history.push({
+      label: 'Extrusion',
+      undo: () => applyExtrusionState(mesh, change.before),
+      redo: () => applyExtrusionState(mesh, change.after),
+    });
+  } else if (change.kind === 'mapping') {
+    history.push({
+      label: 'Texture Mapping',
+      undo: () => { applyTextureMapping(mesh, change.before); propsPanel.showProperties(mesh); },
+      redo: () => { applyTextureMapping(mesh, change.after); propsPanel.showProperties(mesh); },
+    });
+  } else if (change.kind === 'repeat-scale') {
+    history.push({
+      label: 'Texture Scale Mode',
+      undo: () => { restoreTextureRepeatState(mesh, change.before); propsPanel.showProperties(mesh); },
+      redo: () => { restoreTextureRepeatState(mesh, change.after); propsPanel.showProperties(mesh); },
+    });
+  }
+};
+
+propsPanel.onVoxelizeChanged = (mesh, enabled, wasVoxelized, beforeState) => {
+  const afterState = cloneVoxelState(mesh);
+  history.push({
+    label: enabled ? 'Voxelize Sprite' : 'Devoxelize Sprite',
+    undo: () => restoreVoxelizedState(mesh, wasVoxelized, beforeState),
+    redo: () => restoreVoxelizedState(mesh, enabled, afterState),
+  });
+  hierarchy.refresh();
+};
+
+function applyReliefDepthWithHistory(mesh, delta) {
   const prev = cloneVoxelState(mesh);
   voxelReliefTool.setTargetMesh(mesh);
-  const result = voxelReliefTool.applyExtract(mesh);
+  const result = delta >= 0
+    ? voxelReliefTool.applyExtract(mesh)
+    : voxelReliefTool.applySubtract(mesh);
   if (!result) {
-    showToast('Select pixels with the magic wand first');
+    showToast('Seleccioná una cara o píxeles antes de aplicar profundidad');
     return;
   }
+  const after = cloneVoxelState(mesh);
   voxelReliefTool.updateSelectionOverlay(mesh);
   history.push({
-    label: 'Voxel Extract',
+    label: delta >= 0 ? 'Voxel Extract' : 'Voxel Subtract',
     undo: () => {
       restoreVoxelState(mesh, prev);
       QuadFactory.rebuildVoxelGeometry(mesh);
@@ -247,41 +691,123 @@ propsPanel.onReliefExtract = (mesh) => {
       propsPanel.updateReliefSelectionCount(countMask(mesh.userData.voxelSelection || []));
     },
     redo: () => {
-      QuadFactory.applyVoxelDepthDelta(mesh, result.delta, voxelReliefTool.maxDepth);
-      voxelReliefTool.updateSelectionOverlay(mesh);
-    },
-  });
-  showToast(`Extracted +${result.delta} depth layer${Math.abs(result.delta) !== 1 ? 's' : ''}`);
-};
-
-propsPanel.onReliefSubtract = (mesh) => {
-  const prev = cloneVoxelState(mesh);
-  voxelReliefTool.setTargetMesh(mesh);
-  const result = voxelReliefTool.applySubtract(mesh);
-  if (!result) {
-    showToast('Select pixels with the magic wand first');
-    return;
-  }
-  voxelReliefTool.updateSelectionOverlay(mesh);
-  history.push({
-    label: 'Voxel Subtract',
-    undo: () => {
-      restoreVoxelState(mesh, prev);
+      restoreVoxelState(mesh, after);
       QuadFactory.rebuildVoxelGeometry(mesh);
       voxelReliefTool.updateSelectionOverlay(mesh);
-      propsPanel.updateReliefSelectionCount(countMask(mesh.userData.voxelSelection || []));
-    },
-    redo: () => {
-      QuadFactory.applyVoxelDepthDelta(mesh, result.delta, voxelReliefTool.maxDepth);
-      voxelReliefTool.updateSelectionOverlay(mesh);
     },
   });
-  showToast(`Subtracted ${Math.abs(result.delta)} depth layer${Math.abs(result.delta) !== 1 ? 's' : ''}`);
-};
+  showToast(`${delta >= 0 ? 'Extraído' : 'Sustraído'} ${Math.abs(result.delta)} capa${Math.abs(result.delta) !== 1 ? 's' : ''}`);
+}
+
+propsPanel.onReliefExtract = (mesh) => applyReliefDepthWithHistory(mesh, voxelReliefTool.depthStep);
+propsPanel.onReliefSubtract = (mesh) => applyReliefDepthWithHistory(mesh, -voxelReliefTool.depthStep);
+
+function uniqueSceneObjectName(baseName) {
+  const usedNames = new Set([
+    ...scene.objects.map(object => object.name),
+    ...scene.groups.map(group => group.name),
+  ]);
+  if (!usedNames.has(baseName)) return baseName;
+  let suffix = 2;
+  while (usedNames.has(`${baseName} ${suffix}`)) suffix += 1;
+  return `${baseName} ${suffix}`;
+}
+
+function separateVoxelSelection(mesh) {
+  if (!mesh?.userData?.voxelized) return;
+  const before = cloneVoxelState(mesh);
+  mesh.updateWorldMatrix(true, false);
+  const originalWorld = mesh.matrixWorld.clone();
+  const result = QuadFactory.splitVoxelSelection(
+    mesh,
+    uniqueSceneObjectName(`${mesh.name || 'Voxel'} - Pieza`),
+  );
+  if (!result) {
+    showToast('Seleccioná uno o más vóxeles antes de separar la pieza');
+    return;
+  }
+
+  const { piece, movedCount, localPivotDelta } = result;
+  const pieceWorld = originalWorld.clone().multiply(
+    new THREE.Matrix4().makeTranslation(
+      localPivotDelta.x,
+      localPivotDelta.y,
+      localPivotDelta.z,
+    ),
+  );
+  scene.addObject(piece);
+  scene.exportGroup.updateWorldMatrix(true, false);
+  const pieceLocal = scene.exportGroup.matrixWorld.clone().invert().multiply(pieceWorld);
+  pieceLocal.decompose(piece.position, piece.quaternion, piece.scale);
+  piece.updateMatrixWorld(true);
+
+  const after = cloneVoxelState(mesh);
+  scene.selectObject(piece, false);
+  hierarchy.refresh();
+
+  const restoreOriginal = (state) => {
+    restoreVoxelState(mesh, state);
+    QuadFactory.rebuildVoxelGeometry(mesh);
+  };
+
+  history.push({
+    label: 'Separate Voxel Selection',
+    undo: () => {
+      scene.removeObject(piece, { dispose: false });
+      restoreOriginal(before);
+      scene.selectObject(mesh, false);
+      voxelReliefTool.updateSelectionOverlay(mesh);
+      hierarchy.refresh();
+    },
+    redo: () => {
+      restoreOriginal(after);
+      restoreObjectFromHistory(piece);
+      scene.selectObject(piece, false);
+      voxelReliefTool.updateSelectionOverlay(piece);
+      hierarchy.refresh();
+    },
+  });
+
+  showToast(`${movedCount} vóxel${movedCount !== 1 ? 'es' : ''} separado${movedCount !== 1 ? 's' : ''} en "${piece.name}"`);
+}
+
+function deleteVoxelSelection(mesh) {
+  if (!mesh?.userData?.voxelized) return;
+  const width = mesh.userData.voxelImageWidth;
+  const height = mesh.userData.voxelImageHeight;
+  const result = splitVoxelStateBySelection({
+    active: mesh.userData.voxelActiveMap,
+    selection: mesh.userData.voxelSelection,
+    depthMap: mesh.userData.voxelDepthMap,
+    colors: mesh.userData.voxelColorMap,
+    width,
+    height,
+  });
+  if (!result) {
+    showToast('No hay vóxeles seleccionados para borrar');
+    return;
+  }
+
+  const before = cloneVoxelState(mesh);
+  restoreVoxelState(mesh, result.remaining);
+  QuadFactory.rebuildVoxelGeometry(mesh);
+  voxelReliefTool.updateSelectionOverlay(mesh);
+  const after = cloneVoxelState(mesh);
+  pushVoxelStateHistory(mesh, 'Delete Selected Voxels', before, after);
+  propsPanel.showProperties(mesh);
+  hierarchy.refresh();
+  showToast(`${result.movedCount} vóxel${result.movedCount !== 1 ? 'es' : ''} borrado${result.movedCount !== 1 ? 's' : ''}`);
+}
+
+propsPanel.onReliefSeparate = (mesh) => separateVoxelSelection(mesh);
 
 propsPanel.onReliefClearSelection = (mesh) => {
+  const before = cloneVoxelState(mesh);
   voxelReliefTool.clearSelection(mesh);
+  const after = cloneVoxelState(mesh);
+  pushVoxelStateHistory(mesh, 'Clear Voxel Selection', before, after);
   propsPanel.updateReliefSelectionCount(0);
+  hierarchy.refresh();
 };
 
 propsPanel.onReliefToleranceChanged = (value) => {
@@ -296,12 +822,34 @@ propsPanel.onReliefActivateTool = () => {
   setToolMode('voxel-relief');
 };
 
+propsPanel.onReliefInteractionModeChanged = (mode) => {
+  voxelReliefTool.setInteractionMode(mode);
+  const viewport = document.getElementById('viewport');
+  viewport?.classList.toggle('cursor-voxel-relief-direct', mode === 'direct' && toolMode === 'voxel-relief');
+  viewport?.classList.toggle('cursor-voxel-relief', mode === 'select' && toolMode === 'voxel-relief');
+  updateReliefFloatPanel();
+  if (toolMode === 'voxel-relief') {
+    showToast(mode === 'direct'
+      ? 'Relieve directo: arrastrá una cara para extraer o sustraer'
+      : 'Selección avanzada: elegí Varita, Píxel o Área');
+  }
+};
+
 propsPanel.onReliefSelectionModeChanged = (mode) => {
   voxelReliefTool.setSelectionMode(mode);
   if (toolMode === 'voxel-relief') {
     showToast(`Modo selección: ${reliefModeLabel(mode)}`);
   }
 };
+
+propsPanel.onBrushActivateTool = (mesh) => {
+  scene.selectObject(mesh, false);
+  setToolMode('voxel-brush');
+};
+
+propsPanel.onBrushSizeChanged = (value) => voxelBrushTool.setBrushSize(value);
+propsPanel.onBrushColorChanged = (value) => voxelBrushTool.setColor(value);
+propsPanel.onBrushModeChanged = (mode) => voxelBrushTool.setMode(mode);
 
 function captureVoxelHeightSnapshot(mesh) {
   return {
@@ -449,6 +997,7 @@ propsPanel.onReliefHeightSettingsChanged = (mesh, { maxDepth, invert }, { record
   mesh.userData.voxelHeightInvert = invert;
   QuadFactory.reapplyHeightmap(mesh);
   voxelReliefTool.updateSelectionOverlay(mesh);
+  scheduleAutosave();
 };
 
 // Apply texture from properties panel
@@ -458,6 +1007,8 @@ propsPanel.onApplyTexture = async (mesh) => {
     showToast('Select an asset in the left panel first!');
     return;
   }
+
+  const before = captureMeshAppearance(mesh);
 
   // Clone texture so each object has its own material
   const tex = asset.texture.clone();
@@ -473,29 +1024,115 @@ propsPanel.onApplyTexture = async (mesh) => {
   }
 
   UVExporter.applyAtlas(mesh, tex);
+  mesh.userData.texture = tex;
+  mesh.userData.textureName = asset.name;
+  const after = captureMeshAppearance(mesh);
 
   // Re-render properties to update the apply texture button state
   propsPanel.showProperties(mesh);
   showToast(`Applied texture "${asset.name}" to ${mesh.name}`);
 
-  // Record in history
-  history.push({
-    label: `Apply Texture`,
-    undo: () => {
-      // Basic undo strategy (would need full material snapshot for complex undos)
-      showToast('Undo texture apply not fully supported yet');
-    },
-    redo: () => {
-      QuadFactory.applyTexture(mesh, tex);
-      propsPanel.showProperties(mesh);
-    }
-  });
+  pushAppearanceHistory(mesh, 'Apply Texture', before, after);
 };
 
 // Scene hierarchy selection
 hierarchy.onSelect = (obj) => {
   propsPanel.showProperties(obj);
 };
+
+hierarchy.onDelete = (obj) => {
+  if (!scene.selectedObjects.includes(obj)) scene.selectObject(obj, false);
+  deleteSelected({ forceObjects: true });
+};
+
+hierarchy.onSelectVoxels = (mesh) => {
+  propsPanel.reliefInteractionMode = 'select';
+  voxelReliefTool.setInteractionMode('select');
+  scene.selectObject(mesh, false);
+  propsPanel.showProperties(mesh);
+  setToolMode('voxel-relief');
+};
+
+hierarchy.onDeleteVoxels = (mesh) => deleteVoxelSelection(mesh);
+
+function selectHierarchyItems(items) {
+  scene.deselectObject();
+  const focusedItem = items[items.length - 1];
+  if (focusedItem) scene.selectObject(focusedItem, false);
+}
+
+function restoreHierarchyParents(states) {
+  scene.deselectObject();
+  states.forEach(({ item, parent }) => {
+    (parent || scene.exportGroup).attach(item);
+  });
+  selectHierarchyItems(states.map(state => state.item));
+  hierarchy.refresh();
+}
+
+function moveHierarchyItems(items, targetGroup = null) {
+  const movable = [...new Set(items)].filter(item => item && !item.userData?.isSceneGroup);
+  if (movable.length === 0) return;
+
+  scene.deselectObject();
+  const destination = targetGroup || scene.exportGroup;
+  const states = movable.map(item => ({ item, parent: item.parent }));
+  if (states.every(({ parent }) => parent === destination)) return;
+
+  movable.forEach(item => destination.attach(item));
+  selectHierarchyItems(movable);
+  hierarchy.refresh();
+
+  history.push({
+    label: targetGroup ? 'Move Into Group' : 'Remove From Group',
+    undo: () => restoreHierarchyParents(states),
+    redo: () => {
+      scene.deselectObject();
+      movable.forEach(item => destination.attach(item));
+      selectHierarchyItems(movable);
+      hierarchy.refresh();
+    },
+  });
+  showToast(targetGroup
+    ? `${movable.length} pieza${movable.length !== 1 ? 's' : ''} movida${movable.length !== 1 ? 's' : ''} a "${targetGroup.name}"`
+    : `${movable.length} pieza${movable.length !== 1 ? 's' : ''} fuera del grupo`);
+}
+
+function createGroupFromDrop(items, target) {
+  const members = [...new Set([...items, target])].filter(item => item && !item.userData?.isSceneGroup);
+  if (members.length < 2) return;
+
+  scene.deselectObject();
+  const previousParents = members.map(item => ({ item, parent: item.parent }));
+  const group = scene.createGroup(`Grupo ${scene.groups.length + 1}`, members);
+  group.userData._expanded = true;
+  scene.selectObject(group, false);
+  hierarchy.refresh();
+
+  history.push({
+    label: 'Group by Drag and Drop',
+    undo: () => {
+      scene.deselectObject();
+      previousParents.forEach(({ item, parent }) => (parent || scene.exportGroup).attach(item));
+      scene.exportGroup.remove(group);
+      const index = scene.groups.indexOf(group);
+      if (index >= 0) scene.groups.splice(index, 1);
+      selectHierarchyItems(members);
+      hierarchy.refresh();
+    },
+    redo: () => {
+      scene.deselectObject();
+      scene.restoreGroup(group, members);
+      scene.selectObject(group, false);
+      hierarchy.refresh();
+    },
+  });
+  showToast(`Grupo creado con ${members.length} piezas`);
+}
+
+hierarchy.onDropCreateGroup = (items, target) => createGroupFromDrop(items, target);
+hierarchy.onDropToGroup = (items, group) => moveHierarchyItems(items, group);
+hierarchy.onDropToRoot = (items) => moveHierarchyItems(items, null);
 
 // ──────────────────────────────────────────────
 //  Canvas Click → Place or Select
@@ -516,17 +1153,47 @@ canvas.addEventListener('mousemove', (e) => {
     const viewport = document.getElementById('viewport');
     viewport.classList.toggle('cursor-push-pull-active', !!pushPullTool._hoveredData);
   } else if (toolMode === 'voxel-relief') {
-    voxelReliefTool.onMouseMove(e.clientX, e.clientY);
+    const reliefHover = voxelReliefTool.onMouseMove(e.clientX, e.clientY);
+    if (propsPanel.reliefInteractionMode === 'direct') {
+      updateReliefFloatPanel(reliefHover?.mesh ? reliefHover : null);
+    }
+  } else if (toolMode === 'voxel-brush') {
+    voxelBrushTool.onMouseMove(e.clientX, e.clientY);
   }
 });
 
 canvas.addEventListener('mousedown', (e) => {
   if (toolMode === 'push-pull' && e.button === 0) {
     pushPullTool.onMouseDown(e.clientX, e.clientY);
+  } else if (toolMode === 'voxel-relief' && e.button === 0 && propsPanel.reliefInteractionMode === 'direct') {
+    const picked = voxelReliefTool.pickFace(e.clientX, e.clientY);
+    const before = picked?.mesh ? cloneVoxelState(picked.mesh) : null;
+    const candidate = voxelReliefTool.onMouseDown(e.clientX, e.clientY, { shiftKey: e.shiftKey });
+    if (candidate) {
+      reliefDirectSnapshot = before;
+    }
   } else if (toolMode === 'voxel-relief' && e.button === 0 && voxelReliefTool.selectionMode === 'area') {
     reliefAreaDragged = false;
+    const candidate = scene.pickObject(e.clientX, e.clientY);
+    reliefSelectionSnapshot = candidate?.userData?.voxelized ? cloneVoxelState(candidate) : null;
     if (voxelReliefTool.onMouseDown(e.clientX, e.clientY, { shiftKey: e.shiftKey })) {
       reliefAreaDragged = true;
+    }
+  } else if (toolMode === 'voxel-brush' && e.button === 0) {
+    if (!voxelBrushTool.targetMesh) {
+      const picked = scene.pickObject(e.clientX, e.clientY);
+      if (picked?.userData?.texture) {
+        if (!picked.userData.voxelized) voxelizeWithHistory(picked);
+        scene.selectObject(picked, false);
+        scene.transformControls.detach();
+        voxelBrushTool.setTargetMesh(picked);
+        propsPanel.showProperties(picked);
+      }
+    }
+    const target = voxelBrushTool.targetMesh;
+    brushStrokeSnapshot = target ? cloneVoxelState(target) : null;
+    if (!voxelBrushTool.onMouseDown(e.clientX, e.clientY, { erase: e.shiftKey })) {
+      brushStrokeSnapshot = null;
     }
   }
 });
@@ -542,13 +1209,80 @@ canvas.addEventListener('mouseup', (e) => {
         redo: () => pushPullTool._applyExtrusion(mesh, faceNormal, materialIndex, newDepth),
       });
     }
+  } else if (toolMode === 'voxel-relief' && e.button === 0 && propsPanel.reliefInteractionMode === 'direct') {
+    const result = voxelReliefTool.onMouseUp(e.clientX, e.clientY);
+    if (result) {
+      const mesh = result.mesh;
+      scene.selectObject(mesh, false);
+      propsPanel.updateReliefSelectionCount(countMask(mesh.userData.voxelSelection || []));
+      const after = cloneVoxelState(mesh);
+      if (reliefDirectSnapshot) {
+        history.push({
+          label: result.changedDepth ? 'Voxel Direct Relief' : 'Select Voxel Face',
+          undo: () => {
+            restoreVoxelState(mesh, reliefDirectSnapshot);
+            QuadFactory.rebuildVoxelGeometry(mesh);
+            voxelReliefTool.updateSelectionOverlay(mesh);
+            propsPanel.showProperties(mesh);
+          },
+          redo: () => {
+            restoreVoxelState(mesh, after);
+            QuadFactory.rebuildVoxelGeometry(mesh);
+            voxelReliefTool.updateSelectionOverlay(mesh);
+            propsPanel.showProperties(mesh);
+          },
+        });
+      }
+      updateReliefFloatPanel({
+        mesh,
+        pixel: result.pixel,
+        depth: result.newDepth,
+        dragging: false,
+      });
+      if (result.changedDepth) {
+        const delta = result.newDepth - result.prevDepth;
+        showToast(`${delta >= 0 ? 'Extraído' : 'Sustraído'} ${Math.abs(delta)} capa${Math.abs(delta) !== 1 ? 's' : ''}`);
+      }
+    }
+    hierarchy.refresh();
+    reliefDirectSnapshot = null;
   } else if (toolMode === 'voxel-relief' && e.button === 0 && voxelReliefTool.selectionMode === 'area') {
     const result = voxelReliefTool.onMouseUp(e.clientX, e.clientY);
     if (result) {
       scene.selectObject(result.mesh, false);
       propsPanel.updateReliefSelectionCount(result.selectedCount);
+      if (reliefSelectionSnapshot) {
+        pushVoxelStateHistory(result.mesh, 'Voxel Area Selection', reliefSelectionSnapshot, cloneVoxelState(result.mesh));
+      }
+      reliefSelectionSnapshot = null;
       showToast(`Selected ${result.selectedCount} pixel${result.selectedCount !== 1 ? 's' : ''} (area)`);
+      hierarchy.refresh();
+    } else {
+      reliefSelectionSnapshot = null;
     }
+  } else if (toolMode === 'voxel-brush' && e.button === 0) {
+    const result = voxelBrushTool.onMouseUp();
+    if (result && brushStrokeSnapshot) {
+      const mesh = result.mesh;
+      const after = cloneVoxelState(mesh);
+      history.push({
+        label: 'Pixel Brush',
+        undo: () => {
+          restoreVoxelState(mesh, brushStrokeSnapshot);
+          QuadFactory.rebuildVoxelGeometry(mesh);
+          propsPanel.showProperties(mesh);
+        },
+        redo: () => {
+          restoreVoxelState(mesh, after);
+          QuadFactory.rebuildVoxelGeometry(mesh);
+          propsPanel.showProperties(mesh);
+        },
+      });
+      propsPanel.showProperties(mesh);
+      hierarchy.refresh();
+      showToast(`${result.changedCount} pixel${result.changedCount !== 1 ? 'es' : ''} actualizado${result.changedCount !== 1 ? 's' : ''}`);
+    }
+    brushStrokeSnapshot = null;
   }
 });
 
@@ -565,17 +1299,22 @@ canvas.addEventListener('click', (e) => {
 
   if (toolMode === 'push-pull') return; // handled by mousedown/up
 
+  if (toolMode === 'voxel-brush') return; // handled by mousedown/up
+
   if (toolMode === 'cut') {
     cutTool.onClick(e.clientX, e.clientY);
     return;
   }
 
   if (toolMode === 'voxel-relief') {
+    if (propsPanel.reliefInteractionMode === 'direct') return;
     if (voxelReliefTool.selectionMode === 'area') return;
     if (reliefAreaDragged) {
       reliefAreaDragged = false;
       return;
     }
+    const candidate = scene.pickObject(e.clientX, e.clientY);
+    const beforeSelection = candidate?.userData?.voxelized ? cloneVoxelState(candidate) : null;
     const result = voxelReliefTool.onClick(e.clientX, e.clientY, {
       shiftKey: e.shiftKey,
       altKey: e.altKey,
@@ -583,8 +1322,12 @@ canvas.addEventListener('click', (e) => {
     if (result) {
       scene.selectObject(result.mesh, false);
       propsPanel.updateReliefSelectionCount(result.selectedCount);
+      if (beforeSelection) {
+        pushVoxelStateHistory(result.mesh, 'Voxel Selection', beforeSelection, cloneVoxelState(result.mesh));
+      }
       const mode = reliefModeLabel(voxelReliefTool.selectionMode);
       showToast(`${mode}: ${result.selectedCount} pixel${result.selectedCount !== 1 ? 's' : ''} selected`);
+      hierarchy.refresh();
     } else {
       showToast('Click a voxelized sprite to select pixels');
     }
@@ -644,8 +1387,18 @@ canvasContainer.addEventListener('dragover', (e) => {
   e.dataTransfer.dropEffect = 'copy';
 });
 
-canvasContainer.addEventListener('drop', (e) => {
+canvasContainer.addEventListener('drop', async (e) => {
   e.preventDefault();
+  const modelIndex = e.dataTransfer.getData('application/x-spriteforge-model');
+  if (modelIndex !== '') {
+    const modelAsset = assetPanel.getModelAssetByIndex(parseInt(modelIndex, 10));
+    if (modelAsset) {
+      const worldPos = scene.getWorldPositionFromScreen(e.clientX, e.clientY);
+      await placeModelAsset(modelAsset, worldPos);
+    }
+    return;
+  }
+
   const idxStr = e.dataTransfer.getData('text/plain');
   const idx = parseInt(idxStr, 10);
   if (isNaN(idx)) return;
@@ -666,6 +1419,10 @@ canvasContainer.addEventListener('drop', async (e) => {
     const voxelFiles = droppedFiles.filter(file =>
       file.type === 'application/json' || file.name.toLowerCase().endsWith('.json')
     );
+    const modelFiles = droppedFiles.filter(file => {
+      const extension = file.name.split('.').pop()?.toLowerCase();
+      return MODEL_EXTENSIONS.includes(extension);
+    });
     const files = droppedFiles.filter(f => f.type === 'image/png');
 
     if (voxelFiles.length > 0) {
@@ -676,6 +1433,15 @@ canvasContainer.addEventListener('drop', async (e) => {
           ? { x: worldPos.x + offsetX, y: 0, z: worldPos.z }
           : null);
         if (mesh) offsetX += mesh.userData.originalWidth + 1;
+      }
+    }
+
+    if (modelFiles.length > 0) {
+      const worldPos = scene.getWorldPositionFromScreen(e.clientX, e.clientY);
+      for (const file of modelFiles) {
+        await import3DFile(file, worldPos
+          ? { x: worldPos.x, y: worldPos.y, z: worldPos.z }
+          : null);
       }
     }
 
@@ -747,7 +1513,7 @@ function placeAsset(asset, clientX, clientY) {
   history.push({
     label: `Create ${mesh.name}`,
     undo: () => {
-      scene.removeObject(mesh);
+      scene.removeObject(mesh, { dispose: false });
       hierarchy.refresh();
     },
     redo: () => {
@@ -803,7 +1569,7 @@ function placeAssetsGrid(assets, clientX, clientY) {
   history.push({
     label: `Create ${count} assets`,
     undo: () => {
-      createdMeshes.forEach(m => scene.removeObject(m));
+      createdMeshes.forEach(m => scene.removeObject(m, { dispose: false }));
       hierarchy.refresh();
     },
     redo: () => {
@@ -839,7 +1605,7 @@ function placePrimitive(type) {
 
   history.push({
     label: `Create ${mesh.name}`,
-    undo: () => { scene.removeObject(mesh); hierarchy.refresh(); },
+    undo: () => { scene.removeObject(mesh, { dispose: false }); hierarchy.refresh(); },
     redo: () => { scene.addObject(mesh); hierarchy.refresh(); }
   });
 
@@ -871,11 +1637,11 @@ function duplicateSelected() {
   history.push({
     label: `Duplicate ${selection.length} objects`,
     undo: () => {
-      clones.forEach(c => scene.removeObject(c));
+      clones.forEach(c => scene.removeObject(c, { dispose: false }));
       hierarchy.refresh();
     },
     redo: () => {
-      clones.forEach(c => scene.addObject(c));
+      clones.forEach(c => restoreObjectFromHistory(c));
       hierarchy.refresh();
     }
   });
@@ -883,29 +1649,62 @@ function duplicateSelected() {
   showToast(`Duplicated ${selection.length} object(s)`);
 }
 
-function deleteSelected() {
+function detachObjectForHistory(obj) {
+  scene.deselectObject(obj);
+  if (obj.userData.isSceneGroup) {
+    if (obj.parent) obj.parent.remove(obj);
+    const groupIndex = scene.groups.indexOf(obj);
+    if (groupIndex >= 0) scene.groups.splice(groupIndex, 1);
+  } else {
+    if (obj.parent) obj.parent.remove(obj);
+    const objectIndex = scene.objects.indexOf(obj);
+    if (objectIndex >= 0) scene.objects.splice(objectIndex, 1);
+  }
+  scene._updateObjectCount();
+}
+
+function restoreObjectFromHistory(obj) {
+  if (obj.userData.isSceneGroup) {
+    if (!scene.groups.includes(obj)) scene.groups.push(obj);
+    if (obj.parent !== scene.exportGroup) scene.exportGroup.add(obj);
+  } else {
+    if (!scene.objects.includes(obj)) scene.objects.push(obj);
+    if (obj.parent !== scene.exportGroup && !obj.parent?.userData?.isSceneGroup) {
+      scene.exportGroup.add(obj);
+    }
+  }
+  scene._updateObjectCount();
+}
+
+function deleteSelected({ forceObjects = false } = {}) {
   const selection = [...scene.selectedObjects];
   if (selection.length === 0) return;
 
+  const voxelTarget = selection.length === 1 && selection[0].userData?.voxelized
+    ? selection[0]
+    : null;
+  const selectedVoxelCount = voxelTarget?.userData?.voxelSelection
+    ? countMask(voxelTarget.userData.voxelSelection)
+    : 0;
+  if (!forceObjects && toolMode === 'voxel-relief' && selectedVoxelCount > 0) {
+    deleteVoxelSelection(voxelTarget);
+    return;
+  }
+
   const count = selection.length;
 
-  selection.forEach(item => {
-    if (item.userData.isSceneGroup) {
-      scene.removeGroup(item);
-    } else {
-      scene.removeObject(item);
-    }
-  });
+  selection.forEach(detachObjectForHistory);
   hierarchy.refresh();
 
   history.push({
     label: `Delete ${count} object(s)`,
-    undo: () => showToast('Undo delete not fully supported for groups yet'),
+    undo: () => {
+      selection.forEach(restoreObjectFromHistory);
+      selection.forEach(obj => scene.selectObject(obj, true));
+      hierarchy.refresh();
+    },
     redo: () => {
-      selection.forEach(item => {
-        if (item.userData.isSceneGroup) scene.removeGroup(item);
-        else scene.removeObject(item);
-      });
+      selection.forEach(detachObjectForHistory);
       hierarchy.refresh();
     }
   });
@@ -913,17 +1712,32 @@ function deleteSelected() {
   showToast(`Deleted ${count} object(s)`);
 }
 
+function updateGroupingActions(selection = scene.selectedObjects) {
+  const selected = selection || [];
+  const hasGroup = selected.some(object => object.userData?.isSceneGroup);
+  const hasGroupedObject = selected.some(object => object.parent?.userData?.isSceneGroup);
+  const canGroup = selected.length >= 2 && !hasGroup && !hasGroupedObject;
+  const canUngroup = selected.some(object => object.userData?.isSceneGroup);
+
+  const groupButton = document.getElementById('btn-group-selected');
+  const ungroupButton = document.getElementById('btn-ungroup-selected');
+  if (groupButton) groupButton.disabled = !canGroup;
+  if (ungroupButton) ungroupButton.disabled = !canUngroup;
+}
+
 function groupSelected() {
   const selection = [...scene.selectedObjects];
-  if (selection.length < 2) {
-    showToast('Select 2 or more objects to group');
+  const hasGroupedObject = selection.some(object => object.parent?.userData?.isSceneGroup);
+  if (selection.length < 2 || selection.some(object => object.userData?.isSceneGroup) || hasGroupedObject) {
+    showToast('Seleccioná 2 o más objetos sin agrupar');
     return;
   }
 
-  const group = scene.createGroup('Group', selection);
+  const group = scene.createGroup(`Group ${scene.groups.length + 1}`, selection);
   scene.deselectObject();
   scene.selectObject(group, false);
   hierarchy.refresh();
+  updateGroupingActions();
 
   history.push({
     label: 'Group',
@@ -934,12 +1748,14 @@ function groupSelected() {
       hierarchy.refresh();
     },
     redo: () => {
-      scene.createGroup('Group', children => children); // approximate
+      scene.restoreGroup(group, selection);
+      scene.deselectObject();
+      scene.selectObject(group, false);
       hierarchy.refresh();
     }
   });
 
-  showToast(`Grouped ${selection.length} objects`);
+  showToast(`Agrupados ${selection.length} objetos`);
 }
 
 function ungroupSelected() {
@@ -949,7 +1765,8 @@ function ungroupSelected() {
     return;
   }
 
-  groups.forEach(group => {
+  const groupStates = groups.map(group => ({ group, children: [...group.children] }));
+  groupStates.forEach(({ group }) => {
     const children = scene.dissolveGroup(group);
     scene.deselectObject(group);
     children.forEach(c => scene.selectObject(c, true));
@@ -958,14 +1775,22 @@ function ungroupSelected() {
 
   history.push({
     label: 'Ungroup',
-    undo: () => showToast('Undo ungroup not fully supported yet'),
+    undo: () => {
+      groupStates.forEach(({ group, children }) => scene.restoreGroup(group, children));
+      scene.deselectObject();
+      groupStates.forEach(({ group }) => scene.selectObject(group, true));
+      hierarchy.refresh();
+    },
     redo: () => {
-      groups.forEach(group => scene.dissolveGroup(group));
+      groupStates.forEach(({ group }) => scene.dissolveGroup(group));
+      scene.deselectObject();
+      groupStates.forEach(({ children }) => children.forEach(child => scene.selectObject(child, true)));
       hierarchy.refresh();
     }
   });
 
   showToast('Ungrouped');
+  updateGroupingActions();
 }
 
 // ──────────────────────────────────────────────
@@ -984,6 +1809,8 @@ function setTransformBtn(mode) {
 document.getElementById('btn-translate').addEventListener('click', () => setTransformBtn('translate'));
 document.getElementById('btn-rotate').addEventListener('click', () => setTransformBtn('rotate'));
 document.getElementById('btn-scale').addEventListener('click', () => setTransformBtn('scale'));
+document.getElementById('btn-group-selected').addEventListener('click', groupSelected);
+document.getElementById('btn-ungroup-selected').addEventListener('click', ungroupSelected);
 
 // Draw tool buttons
 document.getElementById('btn-tool-line').addEventListener('click', () => setToolMode('line'));
@@ -991,6 +1818,20 @@ document.getElementById('btn-tool-rectangle').addEventListener('click', () => se
 document.getElementById('btn-tool-push-pull').addEventListener('click', () => setToolMode('push-pull'));
 document.getElementById('btn-tool-cut').addEventListener('click', () => setToolMode('cut'));
 document.getElementById('btn-tool-voxel-relief').addEventListener('click', () => setToolMode('voxel-relief'));
+document.getElementById('btn-tool-voxel-brush').addEventListener('click', () => setToolMode('voxel-brush'));
+document.getElementById('btn-relief-float-extract')?.addEventListener('click', () => {
+  const mesh = voxelReliefTool.targetMesh;
+  if (mesh) applyReliefDepthWithHistory(mesh, voxelReliefTool.depthStep);
+});
+document.getElementById('btn-relief-float-subtract')?.addEventListener('click', () => {
+  const mesh = voxelReliefTool.targetMesh;
+  if (mesh) applyReliefDepthWithHistory(mesh, -voxelReliefTool.depthStep);
+});
+document.getElementById('btn-relief-float-exit')?.addEventListener('click', () => setToolMode('transform'));
+document.getElementById('btn-tool-reference').addEventListener('click', () => {
+  setToolMode('reference');
+  document.getElementById('file-reference-image').click();
+});
 
 // Vertex Edit toggle
 document.getElementById('btn-vertex-edit').addEventListener('click', () => {
@@ -1018,10 +1859,19 @@ document.getElementById('btn-vertex-edit').addEventListener('click', () => {
   }
 });
 
+function refreshScaleDependentTextures() {
+  scene.selectedObjects.forEach(obj => {
+    updateTextureRepeatForScale(obj);
+    propsPanel.updateFromTransform(obj);
+  });
+  scheduleAutosave();
+}
+
 // Grid size
 document.getElementById('input-grid-size').addEventListener('change', (e) => {
   const size = parseFloat(e.target.value) || 32;
   scene.updateGrid(size);
+  refreshScaleDependentTextures();
   showToast(`Grid size updated to ${size}px`);
 });
 
@@ -1030,8 +1880,19 @@ let snapOn = false;
 document.getElementById('btn-snap').addEventListener('click', () => {
   snapOn = !snapOn;
   scene.setSnap(snapOn);
+  refreshScaleDependentTextures();
   document.getElementById('btn-snap').classList.toggle('active', snapOn);
   showToast(snapOn ? 'Snap to Grid ON' : 'Snap to Grid OFF');
+});
+
+let scaleSnapOn = false;
+document.getElementById('input-snap-scale').addEventListener('change', (e) => {
+  scaleSnapOn = e.target.checked;
+  scene.setScaleSnap(scaleSnapOn);
+  refreshScaleDependentTextures();
+  showToast(scaleSnapOn
+    ? 'Scale snap ON — el tamaño se ajusta al grid'
+    : 'Scale snap OFF');
 });
 
 let assetSnapOn = false;
@@ -1071,33 +1932,90 @@ document.getElementById('btn-redo').addEventListener('click', () => {
 });
 
 // Export
+function exportFilename(defaultFilename) {
+  if (scene.selectedObjects.length === 0) return defaultFilename;
+
+  const name = scene.selectedObjects.length === 1
+    ? scene.selectedObjects[0].name
+    : `selection-${scene.selectedObjects.length}`;
+  const safeName = String(name || '').trim().replace(/[^a-zA-Z0-9._-]+/g, '-');
+  return safeName || defaultFilename;
+}
+
+function prepareExport(defaultFilename) {
+  const scope = createExportScope(scene);
+  if (!scope.hasContent) throw new Error('No hay objetos para exportar');
+  return {
+    ...scope,
+    filename: exportFilename(defaultFilename),
+  };
+}
+
+function updateExportScopeLabel() {
+  const label = document.getElementById('export-scope-label');
+  if (!label) return;
+
+  const selection = scene.selectedObjects || [];
+  if (selection.length === 0) {
+    label.textContent = 'Escena completa';
+    label.title = 'No hay selección: se exporta toda la escena';
+  } else if (selection.length === 1 && selection[0].userData?.isSceneGroup) {
+    label.textContent = `Grupo seleccionado: ${selection[0].name}`;
+    label.title = 'Se exporta únicamente este grupo';
+  } else if (selection.length === 1) {
+    label.textContent = `Objeto seleccionado: ${selection[0].name}`;
+    label.title = 'Se exporta únicamente este objeto';
+  } else {
+    label.textContent = `${selection.length} objetos seleccionados`;
+    label.title = 'Se exportan únicamente los objetos seleccionados';
+  }
+}
+
 document.getElementById('btn-export-gltf').addEventListener('click', async () => {
-  showToast('Exporting GLTF...');
   try {
-    await GLTFExportManager.export(scene.exportGroup, 'sprite3d-model');
-    showToast('GLTF exported!');
+    const target = prepareExport('sprite3d-model');
+    showToast(`Exportando ${target.label} como GLTF...`);
+    await GLTFExportManager.export(target.group, target.filename);
+    showToast('GLTF exportado');
   } catch (e) {
-    showToast('Export failed: ' + e.message);
+    showToast('No se pudo exportar: ' + e.message);
   }
 });
 
-document.getElementById('btn-export-obj').addEventListener('click', () => {
-  showToast('Exporting OBJ...');
+document.getElementById('btn-export-obj').addEventListener('click', async () => {
   try {
-    OBJExportManager.export(scene.exportGroup, 'sprite3d-model');
-    showToast('OBJ exported!');
+    const target = prepareExport('sprite3d-model');
+    showToast(`Exportando ${target.label} como OBJ...`);
+    await OBJExportManager.export(target.group, target.filename);
+    showToast('OBJ exportado');
   } catch (e) {
-    showToast('Export failed: ' + e.message);
+    showToast('No se pudo exportar: ' + e.message);
+  }
+});
+
+document.getElementById('btn-export-fbx').addEventListener('click', async () => {
+  try {
+    const target = prepareExport('sprite3d-model');
+    showToast(`Exportando ${target.label} como FBX...`);
+    const result = await FBXExportManager.export(target.group, target.filename);
+    if (result) {
+      showToast(result.textureCount
+        ? `FBX + PNG + .meta exportados (${result.textureCount} textura${result.textureCount === 1 ? '' : 's'})`
+        : 'FBX exportado');
+    }
+  } catch (e) {
+    showToast('No se pudo exportar: ' + e.message);
   }
 });
 
 document.getElementById('btn-export-godot').addEventListener('click', async () => {
-  showToast('Exporting Godot MeshLibrary...');
   try {
-    await GodotExportManager.exportLibrary(scene.exportGroup, 'sprite3d_meshlibrary');
-    showToast('Godot MeshLibrary exported!');
+    const target = prepareExport('sprite3d_meshlibrary');
+    showToast(`Exportando ${target.label} como Godot MeshLibrary...`);
+    await GodotExportManager.exportLibrary(target.group, target.filename);
+    showToast('Godot MeshLibrary exportada');
   } catch (e) {
-    showToast('Export failed: ' + e.message);
+    showToast('No se pudo exportar: ' + e.message);
   }
 });
 
@@ -1105,12 +2023,39 @@ document.getElementById('btn-export-godot').addEventListener('click', async () =
 //  Keyboard Shortcuts
 // ──────────────────────────────────────────────
 
+const cameraKeys = new Set();
+const cameraMovementKeys = new Set(['w', 'a', 's', 'd', 'shift']);
+
+window.addEventListener('keyup', (e) => {
+  const key = e.key.toLowerCase();
+  if (cameraMovementKeys.has(key)) cameraKeys.delete(key);
+});
+
+document.getElementById('btn-export-unreal').addEventListener('click', async () => {
+  try {
+    const target = prepareExport('spriteforge-unreal');
+    showToast(`Exportando ${target.label} para Unreal Engine...`);
+    await UnrealExportManager.exportStaticMesh(target.group, target.filename);
+    showToast('GLB listo para importar en Unreal Engine');
+  } catch (e) {
+    showToast('No se pudo exportar: ' + e.message);
+  }
+});
+
+window.addEventListener('blur', () => cameraKeys.clear());
+
 window.addEventListener('keydown', (e) => {
   // Ignore if typing in an input
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
-  switch (e.key.toLowerCase()) {
-    case 'w': setTransformBtn('translate'); break;
+  const key = e.key.toLowerCase();
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && cameraMovementKeys.has(key)) {
+    cameraKeys.add(key);
+    e.preventDefault();
+    return;
+  }
+
+  switch (key) {
     case 'e': setTransformBtn('rotate'); break;
     case 'r': setTransformBtn('scale'); break;
     case 'delete':
@@ -1163,7 +2108,18 @@ window.addEventListener('keydown', (e) => {
     case 'm':
       setToolMode('voxel-relief');
       break;
+    case 'v':
+      setToolMode('voxel-brush');
+      break;
+    case 'q':
+      e.preventDefault();
+      openToolWheel(lastPointerPosition.x, lastPointerPosition.y);
+      break;
     case 'escape':
+      if (toolWheel && !toolWheel.hidden) {
+        closeToolWheel();
+        break;
+      }
       if (toolMode !== 'transform') {
         setToolMode('transform');
         showToast('Returned to Transform mode');
@@ -1204,6 +2160,112 @@ window.showToast = showToast;
 //  Project Save / Load
 // ──────────────────────────────────────────────
 
+function getMeshTextureDataUrl(mesh) {
+  const images = [
+    mesh.userData.textureImage,
+    mesh.userData.texture?.image,
+    ...(Array.isArray(mesh.material)
+      ? mesh.material.map(material => material?.map?.image)
+      : [mesh.material?.map?.image]),
+  ];
+
+  for (const image of images) {
+    const source = image?.currentSrc || image?.src;
+    if (typeof source === 'string' && source.startsWith('data:')) return source;
+  }
+  return null;
+}
+
+function serializeProject() {
+  const assets = new Map(
+    assetPanel.assets.map(asset => [asset.name, {
+      name: asset.name,
+      dataUrl: asset.dataUrl,
+    }]),
+  );
+
+  // Textures loaded directly on an object also need to be embedded.
+  scene.objects.forEach(obj => {
+    const textureName = obj.userData.textureName || '';
+    const dataUrl = getMeshTextureDataUrl(obj);
+    if (textureName && dataUrl && !assets.has(textureName)) {
+      assets.set(textureName, { name: textureName, dataUrl });
+    }
+  });
+
+  return {
+    version: 2,
+    assets: [...assets.values()],
+    modelAssets: assetPanel.modelAssets.map(asset => ({
+      name: asset.name,
+      format: asset.format,
+      sourceBase64: asset.sourceBase64,
+    })),
+    objects: scene.objects.map(obj => {
+      const pos = obj.position;
+      const rot = obj.rotation;
+      const scl = obj.scale;
+      const importedAsset = obj.userData.type === 'imported-3d'
+        ? assetPanel.modelAssets.find(asset => asset.name === obj.userData.imported3DName)
+        : null;
+      return {
+        name: obj.name,
+        type: obj.userData.type,
+        imported3DFormat: obj.userData.imported3DFormat || null,
+        imported3DAssetName: importedAsset?.name || null,
+        imported3DSource: importedAsset ? null : (obj.userData.imported3DSource || null),
+        textureName: obj.userData.textureName || '',
+        originalWidth: obj.userData.originalWidth,
+        originalHeight: obj.userData.originalHeight,
+        extrusionDepth: obj.userData.extrusionDepth,
+        textureSides: obj.userData.textureSides !== false,
+        realUVApplied: !!obj.userData.realUVApplied,
+        uvLayoutType: obj.userData.uvLayoutType || '',
+        position: [pos.x, pos.y, pos.z],
+        rotation: [rot.x, rot.y, rot.z],
+        scale: [scl.x, scl.y, scl.z],
+        uvRepeat: obj.userData.uvRepeat || [1, 1],
+        uvOffset: obj.userData.uvOffset || [0, 0],
+        textureRepeatOnScale: !!obj.userData.textureRepeatOnScale,
+        textureRepeatBaseScale: obj.userData.textureRepeatBaseScale || null,
+        textureRepeatBaseUV: obj.userData.textureRepeatBaseUV || null,
+        voxelSource: obj.userData.voxelSource || null,
+        voxelSize: obj.userData.voxelSize || 1,
+        voxelized: !!obj.userData.voxelized,
+        voxelPixelSize: obj.userData.voxelPixelSize || 1,
+        voxelUsesUVRepeat: !!obj.userData.voxelUsesUVRepeat,
+        voxelRepeat: obj.userData.voxelRepeat || null,
+        voxelScaleCompensation: obj.userData.voxelScaleCompensation || null,
+        voxelSourceScale: obj.userData.voxelSourceScale || null,
+        voxelPreviousTextureRepeatOnScale: obj.userData.voxelPreviousTextureRepeatOnScale ?? null,
+        voxelPreviousTextureRepeatBaseScale: obj.userData.voxelPreviousTextureRepeatBaseScale || null,
+        voxelPreviousTextureRepeatBaseUV: obj.userData.voxelPreviousTextureRepeatBaseUV || null,
+        voxelActiveMap: obj.userData.voxelActiveMap ? Array.from(obj.userData.voxelActiveMap) : null,
+        voxelColorMap: obj.userData.voxelColorMap ? Array.from(obj.userData.voxelColorMap) : null,
+        voxelDepthMap: obj.userData.voxelDepthMap ? Array.from(obj.userData.voxelDepthMap) : null,
+        voxelPivotOffset: obj.userData.voxelPivotOffset || null,
+        voxelDerivedPiece: !!obj.userData.voxelDerivedPiece,
+        voxelHeightmapSource: obj.userData.voxelHeightmapSource || null,
+        voxelHeightmapName: obj.userData.voxelHeightmapName || null,
+        voxelHeightMax: obj.userData.voxelHeightMax ?? 8,
+        voxelHeightInvert: !!obj.userData.voxelHeightInvert,
+        voxelColor: obj.userData.type === 'voxel-json' && obj.material?.color
+          ? obj.material.color.getHex()
+          : null,
+      };
+    }),
+    groups: scene.groups.map(group => ({
+      name: group.name,
+      position: [group.position.x, group.position.y, group.position.z],
+      rotation: [group.rotation.x, group.rotation.y, group.rotation.z],
+      scale: [group.scale.x, group.scale.y, group.scale.z],
+      children: group.children
+        .map(child => scene.objects.indexOf(child))
+        .filter(index => index >= 0),
+    })),
+  };
+}
+
 async function saveProject() {
   let fileHandle = null;
   if (window.showSaveFilePicker) {
@@ -1223,36 +2285,7 @@ async function saveProject() {
 
   showToast('Saving project...');
 
-  const project = {
-    version: 1,
-    assets: assetPanel.assets.map(a => ({
-      name: a.name,
-      dataUrl: a.dataUrl
-    })),
-    objects: scene.objects.map(obj => {
-      const pos = obj.position;
-      const rot = obj.rotation;
-      const scl = obj.scale;
-      return {
-        name: obj.name,
-        type: obj.userData.type,
-        textureName: obj.userData.textureName || '',
-        originalWidth: obj.userData.originalWidth,
-        originalHeight: obj.userData.originalHeight,
-        extrusionDepth: obj.userData.extrusionDepth,
-        position: [pos.x, pos.y, pos.z],
-        rotation: [rot.x, rot.y, rot.z],
-        scale: [scl.x, scl.y, scl.z],
-        uvRepeat: obj.userData.uvRepeat || [1, 1],
-        uvOffset: obj.userData.uvOffset || [0, 0],
-        voxelSource: obj.userData.voxelSource || null,
-        voxelSize: obj.userData.voxelSize || 1,
-        voxelColor: obj.userData.type === 'voxel-json' && obj.material?.color
-          ? obj.material.color.getHex()
-          : null,
-      };
-    })
-  };
+  const project = serializeProject();
 
   const json = JSON.stringify(project);
 
@@ -1261,6 +2294,7 @@ async function saveProject() {
       const writable = await fileHandle.createWritable();
       await writable.write(json);
       await writable.close();
+      persistProjectSnapshot(project);
       showToast('Project saved!');
     } catch (err) {
       console.error(err);
@@ -1281,58 +2315,70 @@ async function saveProject() {
       setTimeout(() => document.body.removeChild(a), 1000);
     };
     reader.readAsDataURL(blob);
+    persistProjectSnapshot(project);
     showToast('Project saved!');
   }
+}
+
+function newProject() {
+  const hasProjectContent = scene.objects.length > 0
+    || scene.referenceGroup.children.length > 0
+    || assetPanel.assets.length > 0
+    || assetPanel.modelAssets.length > 0;
+
+  if (hasProjectContent && !window.confirm('¿Crear un proyecto nuevo? Se quitará el contenido actual del editor.')) {
+    return;
+  }
+
+  if (autosaveTimer) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+  }
+
+  isRestoringProject = true;
+  try {
+    vertexEditor.disable();
+    isVertexEditMode = false;
+    document.getElementById('btn-vertex-edit')?.classList.remove('active');
+
+    scene.clear();
+    history.clear();
+
+    assetPanel.assets.forEach(asset => asset.texture?.dispose());
+    assetPanel.assets = [];
+    assetPanel.clearSelection();
+    if (assetPanel.assetGrid) assetPanel.assetGrid.innerHTML = '';
+    assetPanel.clearModelAssets();
+
+    transformGestureSnapshot = null;
+    vertexGestureSnapshot = null;
+    reliefDirectSnapshot = null;
+    reliefSelectionSnapshot = null;
+    brushStrokeSnapshot = null;
+
+    setToolMode('transform');
+    propsPanel.showEmpty();
+    hierarchy.refresh();
+  } finally {
+    isRestoringProject = false;
+  }
+
+  persistProjectSnapshot({
+    version: 2,
+    assets: [],
+    modelAssets: [],
+    objects: [],
+    groups: [],
+  });
+  updateBeginnerGuide();
+  showToast('Nuevo proyecto listo');
 }
 
 function loadProject(file) {
   const reader = new FileReader();
   reader.onload = (e) => {
     try {
-      const project = JSON.parse(e.target.result);
-      if (!project.assets || !project.objects) throw new Error('Invalid project file');
-
-      // Clear current state
-      scene.clear();
-      hierarchy.refresh();
-      history.clear();
-      propsPanel.showEmpty();
-
-      // Clear UI assets
-      assetPanel.assets = [];
-      assetPanel.selectedAsset = null;
-      document.getElementById('asset-grid').innerHTML = '';
-
-      // Load images asynchronously
-      let loadedAssets = 0;
-      const totalAssets = project.assets.length;
-
-      if (totalAssets === 0) {
-        reconstructObjects(project.objects);
-        return;
-      }
-
-      project.assets.forEach(assetData => {
-        const img = new Image();
-        img.onload = () => {
-          const texture = new THREE.Texture(img);
-          texture.needsUpdate = true;
-          texture.colorSpace = THREE.SRGBColorSpace;
-          texture.magFilter = THREE.NearestFilter;
-          texture.minFilter = THREE.NearestMipMapLinearFilter;
-
-          const asset = { name: assetData.name, texture, image: img, dataUrl: assetData.dataUrl };
-          assetPanel.assets.push(asset);
-          assetPanel._addThumbnail(asset);
-
-          loadedAssets++;
-          if (loadedAssets === totalAssets) {
-            reconstructObjects(project.objects);
-          }
-        };
-        img.src = assetData.dataUrl;
-      });
-
+      restoreProjectData(JSON.parse(e.target.result), { announce: true });
     } catch (err) {
       showToast('Error loading project');
       console.error(err);
@@ -1341,7 +2387,87 @@ function loadProject(file) {
   reader.readAsText(file);
 }
 
-function reconstructObjects(objectDataList) {
+function restoreProjectData(project, { announce = false } = {}) {
+  if (!project?.assets || !project?.objects) throw new Error('Invalid project file');
+
+  isRestoringProject = true;
+
+  // Clear current state.
+  scene.clear();
+  hierarchy.refresh();
+  history.clear();
+  propsPanel.showEmpty();
+
+  // Clear UI assets.
+  assetPanel.assets = [];
+  assetPanel.selectedAsset = null;
+  document.getElementById('asset-grid').innerHTML = '';
+  assetPanel.clearModelAssets();
+  (Array.isArray(project.modelAssets) ? project.modelAssets : []).forEach(asset => {
+    assetPanel.addModelAsset(asset);
+  });
+
+  const finish = async () => {
+    try {
+      const restoredObjects = await reconstructObjects(project.objects);
+      restoreGroups(project.groups, restoredObjects);
+      persistProjectSnapshot(project);
+      if (typeof updateBeginnerGuide === 'function') updateBeginnerGuide();
+      if (announce) showToast('Project loaded successfully');
+    } catch (err) {
+      console.error('Could not restore project objects:', err);
+      showToast(`No se pudo restaurar un modelo: ${err.message}`);
+    } finally {
+      isRestoringProject = false;
+    }
+  };
+
+  const assetDataList = Array.isArray(project.assets) ? project.assets : [];
+  if (assetDataList.length === 0) {
+    finish();
+    return;
+  }
+
+  let loadedAssets = 0;
+  const handleAssetLoaded = () => {
+    loadedAssets += 1;
+    if (loadedAssets === assetDataList.length) finish();
+  };
+
+  assetDataList.forEach(assetData => {
+    const img = new Image();
+    img.onload = () => {
+      const texture = new THREE.Texture(img);
+      texture.needsUpdate = true;
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.magFilter = THREE.NearestFilter;
+      texture.minFilter = THREE.NearestMipMapLinearFilter;
+
+      const asset = { name: assetData.name, texture, image: img, dataUrl: assetData.dataUrl };
+      assetPanel.assets.push(asset);
+      assetPanel._addThumbnail(asset);
+      handleAssetLoaded();
+    };
+    img.onerror = handleAssetLoaded;
+    img.src = assetData.dataUrl;
+  });
+}
+
+function restoreAutosavedProject() {
+  try {
+    const raw = localStorage.getItem(AUTOSAVE_STORAGE_KEY);
+    if (!raw) return;
+    const project = JSON.parse(raw);
+    if (!project?.objects?.length && !project?.assets?.length) return;
+    restoreProjectData(project, { announce: false });
+    showToast('Borrador recuperado automáticamente');
+  } catch (err) {
+    console.warn('Could not restore autosaved project:', err);
+  }
+}
+
+async function reconstructObjects(objectDataList) {
+  const reconstructedObjects = [];
   for (const data of objectDataList) {
     let mesh;
     let baseTex = null;
@@ -1353,26 +2479,73 @@ function reconstructObjects(objectDataList) {
       }
     }
 
-    if (data.type === 'voxel-json' && data.voxelSource) {
+    const importedSource = data.imported3DSource || (
+      data.imported3DAssetName
+        ? assetPanel.modelAssets.find(asset => asset.name === data.imported3DAssetName)?.sourceBase64
+        : null
+    );
+
+    if (data.type === 'imported-3d' && importedSource) {
+      const imported = await importModelSource(importedSource, {
+        name: data.name,
+        format: data.imported3DFormat,
+      });
+      mesh = imported.root;
+      mesh.userData.imported3DFormat = data.imported3DFormat || imported.format;
+      mesh.userData.imported3DSource = importedSource;
+      mesh.userData.imported3DName = data.imported3DAssetName || data.name;
+      assetPanel.addModelAsset({
+        name: data.imported3DAssetName || data.name,
+        format: data.imported3DFormat || imported.format,
+        sourceBase64: importedSource,
+      });
+    } else if (data.type === 'voxel-json' && data.voxelSource) {
       mesh = createVoxelMesh(data.voxelSource, {
         voxelSize: data.voxelSize || 1,
         color: data.voxelColor ?? 0x8fb3d9,
+      });
+    } else if (data.type === 'voxel' && baseTex) {
+      mesh = QuadFactory.createQuad(baseTex, data.textureName || data.name);
+      mesh.scale.set(...(data.scale || [1, 1, 1]));
+      mesh.userData.uvRepeat = data.uvRepeat || [1, 1];
+      mesh.userData.uvOffset = data.uvOffset || [0, 0];
+      mesh.userData.textureRepeatOnScale = !!data.textureRepeatOnScale;
+      mesh.userData.voxelUsesUVRepeat = !!data.voxelUsesUVRepeat;
+      mesh.userData.voxelRepeat = data.voxelRepeat || mesh.userData.uvRepeat;
+      mesh.userData.voxelScaleCompensation = data.voxelScaleCompensation || (
+        data.voxelUsesUVRepeat ? data.voxelRepeat : null
+      );
+      mesh.userData.voxelSourceScale = data.voxelSourceScale || null;
+      mesh.userData.voxelPreviousTextureRepeatOnScale = data.voxelPreviousTextureRepeatOnScale ?? null;
+      mesh.userData.voxelPreviousTextureRepeatBaseScale = data.voxelPreviousTextureRepeatBaseScale || null;
+      mesh.userData.voxelPreviousTextureRepeatBaseUV = data.voxelPreviousTextureRepeatBaseUV || null;
+      QuadFactory.voxelizeSprite(mesh, data.voxelPixelSize || 1, {
+        preserveScale: true,
+        repeatInfo: data.voxelRepeat || data.uvRepeat || [1, 1],
       });
     } else if (data.type === 'plane') mesh = QuadFactory.createPlane(data.originalWidth, data.originalHeight);
     else if (data.type === 'cube') mesh = QuadFactory.createCube(data.originalWidth, data.originalHeight, data.extrusionDepth);
     else if (data.type === 'cylinder') mesh = QuadFactory.createCylinder(data.originalWidth / 2, data.originalHeight);
     else if (data.type === 'quad' || data.type === 'box') {
       if (baseTex) {
-        mesh = QuadFactory.createQuad(baseTex, data.name);
+        mesh = QuadFactory.createQuad(baseTex, data.textureName || data.name);
       } else {
         mesh = QuadFactory.createPlane(data.originalWidth, data.originalHeight);
       }
     } else continue;
 
     mesh.name = data.name;
+    mesh.userData.textureName = data.textureName || '';
     mesh.position.set(...data.position);
     mesh.rotation.set(...data.rotation);
     mesh.scale.set(...data.scale);
+
+    // Project files rebuild primitive geometry instead of serializing its
+    // buffers. Restore the UV layout before restoring the texture so a
+    // cylinder keeps the same wall/top/bottom atlas after reopening a file.
+    if (data.realUVApplied && mesh.geometry) {
+      await UVExporter.applyRealUVToMesh(mesh);
+    }
 
     // Apply texture to primitives
     if (baseTex && (data.type === 'plane' || data.type === 'cube' || data.type === 'cylinder')) {
@@ -1381,12 +2554,30 @@ function reconstructObjects(objectDataList) {
 
     // Re-apply extrusion if it was an extruded quad
     if (data.type === 'box' && data.extrusionDepth > 0 && baseTex) {
-      QuadFactory.extrudeQuad(mesh, data.extrusionDepth);
+      QuadFactory.extrudeQuad(mesh, data.extrusionDepth, data.textureSides !== false);
+    }
+
+    if (data.type === 'voxel' && mesh.userData.voxelized) {
+      if (Array.isArray(data.voxelActiveMap)) mesh.userData.voxelActiveMap = new Uint8Array(data.voxelActiveMap);
+      if (Array.isArray(data.voxelColorMap)) mesh.userData.voxelColorMap = new Uint8Array(data.voxelColorMap);
+      if (Array.isArray(data.voxelDepthMap)) mesh.userData.voxelDepthMap = new Uint16Array(data.voxelDepthMap);
+      mesh.userData.voxelPivotOffset = Array.isArray(data.voxelPivotOffset)
+        ? [...data.voxelPivotOffset]
+        : null;
+      mesh.userData.voxelDerivedPiece = !!data.voxelDerivedPiece;
+      mesh.userData.voxelHeightmapSource = data.voxelHeightmapSource || null;
+      mesh.userData.voxelHeightmapName = data.voxelHeightmapName || null;
+      mesh.userData.voxelHeightMax = data.voxelHeightMax ?? 8;
+      mesh.userData.voxelHeightInvert = !!data.voxelHeightInvert;
+      QuadFactory.rebuildVoxelGeometry(mesh);
     }
 
     // Setup and apply UV Mapping (Tiling/Offset)
     mesh.userData.uvRepeat = data.uvRepeat || [1, 1];
     mesh.userData.uvOffset = data.uvOffset || [0, 0];
+    mesh.userData.textureRepeatOnScale = !!data.textureRepeatOnScale;
+    mesh.userData.textureRepeatBaseScale = data.textureRepeatBaseScale || [mesh.scale.x, mesh.scale.y];
+    mesh.userData.textureRepeatBaseUV = data.textureRepeatBaseUV || [...mesh.userData.uvRepeat];
 
     const applyMappingToMaterial = (mat) => {
       if (mat && mat.map) {
@@ -1403,12 +2594,36 @@ function reconstructObjects(objectDataList) {
     }
 
     scene.addObject(mesh);
+    reconstructedObjects.push(mesh);
   }
 
   hierarchy.refresh();
-  showToast('Project loaded successfully');
+  return reconstructedObjects;
 }
 
+function restoreGroups(groupDataList, restoredObjects) {
+  if (!Array.isArray(groupDataList)) return;
+
+  for (const data of groupDataList) {
+    const group = new THREE.Group();
+    group.name = data.name || 'Group';
+    group.userData.isSceneGroup = true;
+    group.position.set(...(data.position || [0, 0, 0]));
+    group.rotation.set(...(data.rotation || [0, 0, 0]));
+    group.scale.set(...(data.scale || [1, 1, 1]));
+    scene.exportGroup.add(group);
+    scene.groups.push(group);
+
+    (data.children || []).forEach(index => {
+      const child = restoredObjects[index];
+      if (child) group.add(child);
+    });
+  }
+
+  hierarchy.refresh();
+}
+
+document.getElementById('btn-new-project').addEventListener('click', newProject);
 document.getElementById('btn-save-project').addEventListener('click', saveProject);
 
 document.getElementById('btn-load-project').addEventListener('click', () => {
@@ -1434,7 +2649,7 @@ async function importVoxelFile(file, position = null) {
     history.push({
       label: `Import ${mesh.name}`,
       undo: () => {
-        scene.removeObject(mesh);
+        scene.removeObject(mesh, { dispose: false });
         hierarchy.refresh();
       },
       redo: () => {
@@ -1453,6 +2668,144 @@ async function importVoxelFile(file, position = null) {
   }
 }
 
+async function import3DFile(file, position = null) {
+  try {
+    const imported = await importModelFile(file);
+    assetPanel.addModelAsset(imported);
+    return addImportedModel(imported, position);
+  } catch (err) {
+    console.error(err);
+    showToast(`No se pudo importar "${file.name}": ${err.message}`);
+    return null;
+  }
+}
+
+async function placeModelAsset(asset, position = null) {
+  if (!asset?.sourceBase64) return null;
+  try {
+    const imported = await importModelSource(asset.sourceBase64, {
+      name: asset.name,
+      format: asset.format,
+    });
+    return addImportedModel({
+      ...imported,
+      name: asset.name,
+      format: asset.format,
+      sourceBase64: asset.sourceBase64,
+    }, position);
+  } catch (err) {
+    console.error(err);
+    showToast(`No se pudo colocar "${asset.name}": ${err.message}`);
+    return null;
+  }
+}
+
+function addImportedModel(imported, position = null) {
+  const mesh = imported.root;
+  mesh.userData.imported3DFormat = imported.format;
+  mesh.userData.imported3DSource = imported.sourceBase64;
+  mesh.userData.imported3DName = imported.name;
+  if (position) mesh.position.set(position.x, position.y, position.z);
+
+  scene.addObject(mesh);
+  scene.selectObject(mesh, false);
+  hierarchy.refresh();
+  scheduleAutosave();
+
+  history.push({
+    label: `Import ${mesh.name}`,
+    undo: () => {
+      scene.removeObject(mesh, { dispose: false });
+      hierarchy.refresh();
+    },
+    redo: () => {
+      scene.addObject(mesh);
+      scene.selectObject(mesh, false);
+      hierarchy.refresh();
+    },
+  });
+
+  const triangleCount = countImportedTriangles(mesh);
+  showToast(`Importado "${mesh.name}"${triangleCount ? ` (${triangleCount.toLocaleString()} triángulos)` : ''}`);
+  return mesh;
+}
+
+function countImportedTriangles(root) {
+  let count = 0;
+  root.traverse(node => {
+    if (!node.isMesh || !node.geometry) return;
+    const position = node.geometry.getAttribute('position');
+    if (!position) return;
+    count += node.geometry.index ? node.geometry.index.count / 3 : position.count / 3;
+  });
+  return Math.round(count);
+}
+
+function placeReferenceImage(asset) {
+  if (!asset?.image) return null;
+  const texture = asset.texture.clone();
+  texture.needsUpdate = true;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+
+  const width = asset.image.naturalWidth || asset.image.width;
+  const height = asset.image.naturalHeight || asset.image.height;
+  const geometry = new THREE.PlaneGeometry(width, height);
+  geometry.translate(0, height / 2, 0);
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    opacity: 0.42,
+    depthWrite: false,
+    depthTest: false,
+    side: THREE.DoubleSide,
+  });
+  const reference = new THREE.Mesh(geometry, material);
+  reference.name = `Reference: ${asset.name}`;
+  reference.userData.isReference = true;
+  reference.renderOrder = -1;
+
+  const target = scene.selectedObjects.length === 1 ? scene.selectedObjects[0] : null;
+  if (target) {
+    reference.position.copy(target.position);
+    reference.position.z -= 0.75;
+    reference.rotation.copy(target.rotation);
+  } else {
+    const rect = canvas.getBoundingClientRect();
+    const worldPos = scene.getWorldPositionFromScreen(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    if (worldPos) reference.position.set(worldPos.x, 0, worldPos.z);
+  }
+
+  scene.addReference(reference);
+  history.push({
+    label: 'Place Reference Image',
+    undo: () => scene.removeReference(reference, { dispose: false }),
+    redo: () => scene.addReference(reference),
+  });
+  return reference;
+}
+
+document.getElementById('file-reference-image').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const image = await loadImageFromFile(file);
+    const texture = new THREE.Texture(image);
+    texture.needsUpdate = true;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+    placeReferenceImage({ name: file.name, image, texture });
+    setToolMode('transform');
+    showToast(`Referencia "${file.name}" colocada`);
+  } catch (err) {
+    setToolMode('transform');
+    showToast(`No se pudo cargar la referencia: ${err.message}`);
+  }
+});
+
 document.getElementById('btn-import-voxels').addEventListener('click', () => {
   document.getElementById('file-import-voxels').click();
 });
@@ -1462,6 +2815,17 @@ document.getElementById('file-import-voxels').addEventListener('change', async (
   if (file) await importVoxelFile(file);
   e.target.value = '';
 });
+
+document.getElementById('btn-import-3d').addEventListener('click', () => {
+  document.getElementById('file-import-3d').click();
+});
+
+document.getElementById('file-import-3d').addEventListener('change', async (e) => {
+  for (const file of e.target.files || []) await import3DFile(file);
+  e.target.value = '';
+});
+
+document.getElementById('file-import-3d').accept = MODEL_ACCEPT;
 
 // ──────────────────────────────────────────────
 //  Render Loop
@@ -1473,6 +2837,58 @@ document.getElementById('file-import-voxels').addEventListener('change', async (
 
 const contextMenu = document.getElementById('context-menu');
 let contextTarget = null;
+const toolWheel = document.getElementById('tool-wheel');
+const toolWheelLauncher = document.getElementById('btn-tool-wheel');
+let lastPointerPosition = {
+  x: window.innerWidth / 2,
+  y: window.innerHeight / 2,
+};
+
+canvas.addEventListener('pointermove', (event) => {
+  lastPointerPosition = { x: event.clientX, y: event.clientY };
+});
+
+function closeToolWheel() {
+  if (toolWheel) toolWheel.hidden = true;
+}
+
+function openToolWheel(clientX, clientY) {
+  if (!toolWheel) return;
+  const size = 232;
+  const margin = 8;
+  const left = Math.max(margin, Math.min(window.innerWidth - size - margin, clientX - size / 2));
+  const top = Math.max(margin, Math.min(window.innerHeight - size - margin, clientY - size / 2));
+  toolWheel.style.left = `${left}px`;
+  toolWheel.style.top = `${top}px`;
+  toolWheel.hidden = false;
+
+  toolWheel.querySelectorAll('[data-wheel-tool]').forEach(button => {
+    const selectedTool = button.dataset.wheelTool;
+    const active = toolMode === 'transform'
+      ? selectedTool === activeTransformMode
+      : selectedTool === toolMode;
+    button.classList.toggle('active', active);
+  });
+  toolWheel.querySelector('.tool-wheel-item.active, .tool-wheel-item')?.focus({ preventScroll: true });
+}
+
+toolWheelLauncher?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (toolWheel?.hidden) openToolWheel(lastPointerPosition.x, lastPointerPosition.y);
+  else closeToolWheel();
+});
+
+document.getElementById('btn-tool-wheel-close')?.addEventListener('click', closeToolWheel);
+
+toolWheel?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  const button = event.target.closest('[data-wheel-tool]');
+  if (!button) return;
+  const selectedTool = button.dataset.wheelTool;
+  if (['translate', 'rotate', 'scale'].includes(selectedTool)) setTransformBtn(selectedTool);
+  else setToolMode(selectedTool);
+  closeToolWheel();
+});
 
 function getRecommendedUVResolution(mesh) {
   const maps = [];
@@ -1498,10 +2914,13 @@ canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
 
   const picked = scene.pickObject(e.clientX, e.clientY);
-  if (!picked) {
+  if (!picked || e.shiftKey) {
     contextMenu.style.display = 'none';
+    openToolWheel(e.clientX, e.clientY);
     return;
   }
+
+  closeToolWheel();
 
   contextTarget = picked;
   // Add to selection additively if not already selected, else keep current selection
@@ -1512,7 +2931,8 @@ canvas.addEventListener('contextmenu', (e) => {
   // Show/hide group-specific items
   const sel = scene.selectedObjects;
   const hasGroup = sel.some(o => o.userData.isSceneGroup);
-  const canGroup = sel.length >= 2 && !hasGroup;
+  const hasGroupedObject = sel.some(o => o.parent?.userData?.isSceneGroup);
+  const canGroup = sel.length >= 2 && !hasGroup && !hasGroupedObject;
   document.getElementById('menu-group').style.display = canGroup ? '' : 'none';
   document.getElementById('menu-ungroup').style.display = hasGroup ? '' : 'none';
 
@@ -1535,6 +2955,7 @@ window.addEventListener('click', (e) => {
   if (!contextMenu.contains(e.target)) {
     contextMenu.style.display = 'none';
   }
+  if (!toolWheel?.contains(e.target) && e.target !== toolWheelLauncher) closeToolWheel();
 });
 
 document.getElementById('menu-duplicate').addEventListener('click', () => {
@@ -1543,7 +2964,7 @@ document.getElementById('menu-duplicate').addEventListener('click', () => {
 });
 
 document.getElementById('menu-delete').addEventListener('click', () => {
-  deleteSelected();
+  deleteSelected({ forceObjects: true });
   contextMenu.style.display = 'none';
 });
 
@@ -1562,7 +2983,9 @@ document.getElementById('menu-export-uv').addEventListener('click', async () => 
   if (target) {
     try {
       const resolution = getRecommendedUVResolution(target);
+      const before = captureMeshAppearance(target);
       await UVExporter.generateRealLayout(target, resolution);
+      pushAppearanceHistory(target, 'Generate Real UV', before, captureMeshAppearance(target));
       showToast(`Real UV layout exported (${resolution}px) for ${target.name}`);
     } catch (err) {
       try {
@@ -1600,6 +3023,7 @@ document.getElementById('menu-load-texture').addEventListener('click', () => {
         texture.magFilter = THREE.NearestFilter;
         texture.minFilter = THREE.NearestMipMapLinearFilter;
 
+        const before = captureMeshAppearance(target);
         try {
           // Keep loading flow identical to export flow:
           // always ensure real UVs exist before applying custom texture.
@@ -1610,6 +3034,9 @@ document.getElementById('menu-load-texture').addEventListener('click', () => {
         }
 
         UVExporter.applyAtlas(target, texture);
+        target.userData.texture = texture;
+        target.userData.textureName = file.name;
+        pushAppearanceHistory(target, 'Apply Custom Texture', before, captureMeshAppearance(target));
         showToast(`Custom texture applied to ${target.name}`);
       };
       img.src = rev.target.result;
@@ -1620,8 +3047,11 @@ document.getElementById('menu-load-texture').addEventListener('click', () => {
   contextMenu.style.display = 'none';
 });
 
+const cameraClock = new THREE.Clock();
+
 function animate() {
   requestAnimationFrame(animate);
+  scene.updateCameraMovement(cameraKeys, Math.min(cameraClock.getDelta(), 0.05));
   scene.render();
 }
 
@@ -1686,16 +3116,27 @@ document.getElementById('btn-quick-demo')?.addEventListener('click', () => {
 
 exportMenuButton?.addEventListener('click', () => {
   if (scene.exportGroup.children.length === 0) return;
+  updateExportScopeLabel();
   setWorkflowState('export', ['import', 'edit']);
-  if (contextHintText) contextHintText.textContent = 'Elegí GLTF para uso general, OBJ para compatibilidad o Godot GridMap.';
+  if (contextHintText) contextHintText.textContent = 'Elegí GLTF para uso general, OBJ o FBX para compatibilidad, o Godot GridMap.';
 });
 
 const sceneTreeObserver = new MutationObserver(updateBeginnerGuide);
 sceneTreeObserver.observe(document.getElementById('scene-tree'), { childList: true, subtree: true });
 
 // Initial UI state
+updateGroupingActions();
+updateExportScopeLabel();
 updateBeginnerGuide();
 showToast('Todo listo: importá un PNG y lo ubicamos por vos.');
+
+window.addEventListener('pagehide', flushAutosave);
+window.addEventListener('beforeunload', flushAutosave);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushAutosave();
+});
+
+restoreAutosavedProject();
 
 // ── Dropdown Menu System ──────────────────────────────────────────────────────
 const menuGroups = document.querySelectorAll('.menu-group');

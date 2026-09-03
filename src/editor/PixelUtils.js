@@ -8,7 +8,7 @@ export const ALPHA_THRESHOLD = 30;
  * Read RGBA pixel data from a mesh's source texture.
  * @returns {{ data: Uint8ClampedArray, width: number, height: number } | null}
  */
-export function getImageDataFromMesh(mesh) {
+export function getImageDataFromMesh(mesh, { respectUV = false } = {}) {
   const texture = mesh.userData.texture;
   if (!texture?.image) return null;
 
@@ -21,11 +21,57 @@ export function getImageDataFromMesh(mesh) {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0, width, height);
   const { data } = ctx.getImageData(0, 0, width, height);
-  return { data, width, height };
+
+  if (!respectUV) return { data, width, height };
+
+  const repeat = mesh.userData.uvRepeat || [1, 1];
+  const offset = mesh.userData.uvOffset || [0, 0];
+  const repeatX = Math.max(0.0001, Math.abs(Number(repeat[0]) || 1));
+  const repeatY = Math.max(0.0001, Math.abs(Number(repeat[1]) || 1));
+  const tiledWidth = Math.max(1, Math.round(width * repeatX));
+  const tiledHeight = Math.max(1, Math.round(height * repeatY));
+
+  if (tiledWidth === width && tiledHeight === height && offset[0] === 0 && offset[1] === 0) {
+    return { data, width, height };
+  }
+
+  const tiledData = new Uint8ClampedArray(tiledWidth * tiledHeight * 4);
+  const wrap = (value, size) => ((value % size) + size) % size;
+
+  for (let row = 0; row < tiledHeight; row++) {
+    const sourceV = ((row + 0.5) / tiledHeight) * repeatY + Number(offset[1] || 0);
+    const sourceRow = wrap(Math.floor(sourceV * height), height);
+    for (let col = 0; col < tiledWidth; col++) {
+      const sourceU = ((col + 0.5) / tiledWidth) * repeatX + Number(offset[0] || 0);
+      const sourceCol = wrap(Math.floor(sourceU * width), width);
+      const sourceIndex = (sourceRow * width + sourceCol) * 4;
+      const targetIndex = (row * tiledWidth + col) * 4;
+      tiledData[targetIndex] = data[sourceIndex];
+      tiledData[targetIndex + 1] = data[sourceIndex + 1];
+      tiledData[targetIndex + 2] = data[sourceIndex + 2];
+      tiledData[targetIndex + 3] = data[sourceIndex + 3];
+    }
+  }
+
+  return { data: tiledData, width: tiledWidth, height: tiledHeight };
 }
 
 export function pixelIndex(col, row, imgW) {
   return row * imgW + col;
+}
+
+/**
+ * Local-space centre of the first voxel in the editable image grid.
+ * Derived pieces keep the full source image for UVs and painting, but shift
+ * this grid so their transform pivot sits at the bottom-centre of the piece.
+ */
+export function getVoxelGridOrigin(mesh, width, height) {
+  const pixelSize = mesh.userData.voxelPixelSize || 1;
+  const pivot = mesh.userData.voxelPivotOffset || [0, 0];
+  return {
+    x: -width * pixelSize / 2 + pixelSize / 2 - Number(pivot[0] || 0),
+    y: pixelSize / 2 - Number(pivot[1] || 0),
+  };
 }
 
 /**
@@ -144,24 +190,23 @@ export function mergeSelection(selection, newMask, mode) {
  * @returns {{ col: number, row: number } | null}
  */
 export function hitToPixel(mesh, hitPointWorld) {
-  const imgW = mesh.userData.originalWidth
+  const imgW = mesh.userData.voxelImageWidth || (mesh.userData.originalWidth
     ? Math.round(mesh.userData.originalWidth / (mesh.userData.voxelPixelSize || 1))
-    : null;
-  const imgH = mesh.userData.originalHeight
+    : null);
+  const imgH = mesh.userData.voxelImageHeight || (mesh.userData.originalHeight
     ? Math.round(mesh.userData.originalHeight / (mesh.userData.voxelPixelSize || 1))
-    : null;
+    : null);
 
   const texture = mesh.userData.texture?.image;
-  const width = texture ? (texture.naturalWidth || texture.width) : imgW;
-  const height = texture ? (texture.naturalHeight || texture.height) : imgH;
+  const width = mesh.userData.voxelImageWidth || (texture ? (texture.naturalWidth || texture.width) : imgW);
+  const height = mesh.userData.voxelImageHeight || (texture ? (texture.naturalHeight || texture.height) : imgH);
   if (!width || !height) return null;
 
   const pixelSize = mesh.userData.voxelPixelSize || 1;
   const local = hitPointWorld.clone();
   mesh.worldToLocal(local);
 
-  const originX = -width * pixelSize / 2 + pixelSize / 2;
-  const originY = pixelSize / 2;
+  const { x: originX, y: originY } = getVoxelGridOrigin(mesh, width, height);
 
   const col = Math.round((local.x - originX) / pixelSize);
   const row = height - 1 - Math.round((local.y - originY) / pixelSize);
@@ -174,7 +219,7 @@ export function hitToPixel(mesh, hitPointWorld) {
  * Ensure mesh has a depth map aligned to its texture dimensions.
  */
 export function ensureDepthMap(mesh) {
-  const imageData = getImageDataFromMesh(mesh);
+  const imageData = getImageDataFromMesh(mesh, { respectUV: !!mesh.userData.voxelUsesUVRepeat });
   if (!imageData) return null;
 
   const { width, height, data } = imageData;
@@ -194,6 +239,69 @@ export function ensureDepthMap(mesh) {
   return { depthMap: mesh.userData.voxelDepthMap, selection: mesh.userData.voxelSelection, data, width, height };
 }
 
+/**
+ * Ensure the editable pixel layer used by the voxel brush exists.
+ * The alpha channel of the source texture is only the initial state; after
+ * this is created, the brush owns occupancy and colour for every pixel.
+ */
+export function ensureVoxelPaintData(mesh, suppliedImageData = null) {
+  const imageData = suppliedImageData || getImageDataFromMesh(mesh, {
+    respectUV: !!mesh.userData.voxelUsesUVRepeat,
+  });
+  if (!imageData) return null;
+
+  const { data, width, height } = imageData;
+  const size = width * height;
+  const currentActive = mesh.userData.voxelActiveMap;
+  const currentColors = mesh.userData.voxelColorMap;
+
+  if (!(currentActive instanceof Uint8Array) || currentActive.length !== size
+      || !(currentColors instanceof Uint8Array) || currentColors.length !== size * 4) {
+    const active = new Uint8Array(size);
+    const colors = new Uint8Array(size * 4);
+    for (let i = 0; i < size; i++) {
+      const src = i * 4;
+      active[i] = data[src + 3] >= ALPHA_THRESHOLD ? 1 : 0;
+      colors[src] = data[src];
+      colors[src + 1] = data[src + 1];
+      colors[src + 2] = data[src + 2];
+      colors[src + 3] = data[src + 3];
+    }
+    mesh.userData.voxelActiveMap = active;
+    mesh.userData.voxelColorMap = colors;
+  }
+
+  mesh.userData.voxelImageWidth = width;
+  mesh.userData.voxelImageHeight = height;
+  return {
+    active: mesh.userData.voxelActiveMap,
+    colors: mesh.userData.voxelColorMap,
+    data,
+    width,
+    height,
+  };
+}
+
+/** Return image data that treats brush-added pixels as opaque. */
+export function getVoxelPaintImageData(mesh) {
+  const paintData = ensureVoxelPaintData(mesh);
+  if (!paintData) return null;
+
+  const data = new Uint8ClampedArray(paintData.data);
+  for (let i = 0; i < paintData.active.length; i++) {
+    const ci = i * 4;
+    if (paintData.active[i]) {
+      data[ci] = paintData.colors[ci];
+      data[ci + 1] = paintData.colors[ci + 1];
+      data[ci + 2] = paintData.colors[ci + 2];
+      data[ci + 3] = 255;
+    } else {
+      data[ci + 3] = 0;
+    }
+  }
+  return { data, width: paintData.width, height: paintData.height };
+}
+
 /** Count set bits in a Uint8Array mask. */
 export function countMask(mask) {
   let n = 0;
@@ -201,17 +309,89 @@ export function countMask(mask) {
   return n;
 }
 
+/**
+ * Partition an editable voxel layer using its current selection.
+ * Selected active columns are removed from the remaining state and copied to
+ * a new piece state. Both returned selections are cleared intentionally so a
+ * second separation always requires an explicit new selection.
+ */
+export function splitVoxelStateBySelection({
+  active,
+  selection,
+  depthMap = null,
+  colors = null,
+  width,
+  height,
+}) {
+  const size = Number(width) * Number(height);
+  if (!Number.isInteger(size) || size <= 0) return null;
+  if (!active || active.length !== size || !selection || selection.length !== size) return null;
+  if (depthMap && depthMap.length !== size) return null;
+  if (colors && colors.length !== size * 4) return null;
+
+  const remainingActive = new Uint8Array(active);
+  const pieceActive = new Uint8Array(size);
+  const remainingDepth = depthMap ? new Uint16Array(depthMap) : new Uint16Array(size);
+  const pieceDepth = new Uint16Array(size);
+  const remainingColors = colors ? new Uint8Array(colors) : null;
+  const pieceColors = colors ? new Uint8Array(colors) : null;
+  let movedCount = 0;
+  let minCol = width;
+  let maxCol = -1;
+  let minRow = height;
+  let maxRow = -1;
+
+  for (let index = 0; index < size; index += 1) {
+    if (!selection[index] || !active[index]) continue;
+    const col = index % width;
+    const row = Math.floor(index / width);
+    remainingActive[index] = 0;
+    pieceActive[index] = 1;
+    pieceDepth[index] = depthMap?.[index] || 0;
+    remainingDepth[index] = 0;
+    movedCount += 1;
+    minCol = Math.min(minCol, col);
+    maxCol = Math.max(maxCol, col);
+    minRow = Math.min(minRow, row);
+    maxRow = Math.max(maxRow, row);
+  }
+
+  if (movedCount === 0) return null;
+
+  return {
+    movedCount,
+    remainingCount: countMask(remainingActive),
+    bounds: { minCol, maxCol, minRow, maxRow },
+    remaining: {
+      active: remainingActive,
+      selection: new Uint8Array(size),
+      depthMap: remainingDepth,
+      colors: remainingColors,
+    },
+    piece: {
+      active: pieceActive,
+      selection: new Uint8Array(size),
+      depthMap: pieceDepth,
+      colors: pieceColors,
+    },
+  };
+}
+
 /** Clone depth map and selection for undo snapshots. */
 export function cloneVoxelState(mesh) {
   return {
     depthMap: mesh.userData.voxelDepthMap ? new Uint16Array(mesh.userData.voxelDepthMap) : null,
     selection: mesh.userData.voxelSelection ? new Uint8Array(mesh.userData.voxelSelection) : null,
+    active: mesh.userData.voxelActiveMap ? new Uint8Array(mesh.userData.voxelActiveMap) : null,
+    colors: mesh.userData.voxelColorMap ? new Uint8Array(mesh.userData.voxelColorMap) : null,
   };
 }
 
 export function restoreVoxelState(mesh, state) {
   if (state.depthMap) mesh.userData.voxelDepthMap = new Uint16Array(state.depthMap);
   if (state.selection) mesh.userData.voxelSelection = new Uint8Array(state.selection);
+  if (state.active) mesh.userData.voxelActiveMap = new Uint8Array(state.active);
+  if (state.colors) mesh.userData.voxelColorMap = new Uint8Array(state.colors);
 }
 
 /**

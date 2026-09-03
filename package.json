@@ -10,6 +10,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
+    "@mlightcad/libredwg-web": "^0.7.9",
     "pngjs": "^7.0.0",
     "three": "^0.170.0",
     "xatlas-three": "^0.2.1",

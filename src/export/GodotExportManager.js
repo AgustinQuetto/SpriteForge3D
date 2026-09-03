@@ -11,6 +11,8 @@ export class GodotExportManager {
    * @param {string} fileName - Name of the output file.
    */
   static async exportLibrary(exportGroup, fileName = 'mesh_library') {
+    exportGroup.updateMatrixWorld(true);
+
     // 1. Deduplicate items. We define "uniqueness" by geometry structure and material properties.
     const uniqueItems = new Map();
 
@@ -138,14 +140,16 @@ export class GodotExportManager {
           
           const id = itemIds[sig];
           if (id !== undefined) {
-              const x = Math.floor(child.position.x / 32);
-              const y = Math.floor(child.position.y / 32);
+              const worldPosition = child.getWorldPosition(new THREE.Vector3());
+              const x = Math.floor(worldPosition.x / 32);
+              const y = Math.floor(worldPosition.y / 32);
               // In Godot, Z points towards viewer. Same as Three.js, but GridMap Z can be identical or inverted based on user layout.
-              const z = Math.floor(child.position.z / 32);
+              const z = Math.floor(worldPosition.z / 32);
               
               // Handle very basic Y rotation for the tile mapping
               let rotIndex = 0; // default orientation
-              const rotY = Math.round(THREE.MathUtils.radToDeg(child.rotation.y));
+              const worldRotation = new THREE.Euler().setFromRotationMatrix(child.matrixWorld);
+              const rotY = Math.round(THREE.MathUtils.radToDeg(worldRotation.y));
               if (rotY === 90 || rotY === -270) rotIndex = 16;
               else if (rotY === 180 || rotY === -180) rotIndex = 10;
               else if (rotY === 270 || rotY === -90) rotIndex = 22;
