@@ -7,7 +7,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "spriteforge": "node scripts/spriteforge-cli.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "benchmark:engine": "node scripts/benchmark-engine.mjs"
   },
   "dependencies": {
     "@mlightcad/libredwg-web": "^0.7.9",

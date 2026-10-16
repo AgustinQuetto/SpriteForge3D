@@ -1,5 +1,6 @@
 import { QuadFactory } from '../editor/QuadFactory.js';
 import { cloneVoxelState } from '../editor/PixelUtils.js';
+const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 
 /**
  * PropertiesPanel — Shows selected object properties with transform inputs, 
@@ -47,6 +48,14 @@ export class PropertiesPanel {
     this.body.innerHTML = '<div class="prop-empty"><strong>Sin selección</strong><span>Elegí un objeto en la escena para editarlo.</span></div>';
   }
 
+  showMultiple(count) {
+    this.currentMesh = null;
+    const summary = document.createElement('div'); summary.className = 'prop-empty';
+    const title = document.createElement('strong'); title.textContent = `${count} objetos seleccionados`;
+    const hint = document.createElement('span'); hint.textContent = 'Usá el gizmo para transformarlos juntos o Grupos para agruparlos.';
+    summary.append(title, hint); this.body.replaceChildren(summary);
+  }
+
   showProperties(mesh) {
     if (!mesh) { this.showEmpty(); return; }
     this.currentMesh = mesh;
@@ -74,7 +83,7 @@ export class PropertiesPanel {
     this.body.innerHTML = `
       <div class="prop-section">
         <div class="prop-section-title">Nombre</div>
-        <input type="text" class="prop-input" id="prop-name" value="${mesh.name}" style="width:100%;margin-bottom:8px">
+        <input type="text" class="prop-input" id="prop-name" value="${escapeHTML(mesh.name)}" style="width:100%;margin-bottom:8px">
       </div>
 
       ${isSceneGroup ? `
@@ -274,7 +283,7 @@ export class PropertiesPanel {
         <div class="dropdown-divider" style="margin:12px 0;opacity:0.35"></div>
         <div class="prop-section-title" style="margin-bottom:6px">Heightmap (Mapa de grises)</div>
         <div style="margin-bottom:8px;font-size:12px;color:var(--text-secondary);word-break:break-all">
-          ${heightmapLabel}
+          ${escapeHTML(heightmapLabel)}
         </div>
         <div class="prop-slider-row">
           <span class="prop-slider-label">Max height</span>
@@ -308,7 +317,7 @@ export class PropertiesPanel {
       ${!isSceneGroup ? `<div class="prop-section">
         <div class="prop-section-title">Textura</div>
         <div style="margin-bottom:8px;text-align:center;padding:6px;background:var(--bg-input);border-radius:var(--radius-sm);font-size:12px;color:var(--text-secondary)">
-          ${hasTexture ? `✓ ${mesh.userData.textureName || 'Aplicada'}` : 'Sin textura'}
+          ${hasTexture ? `✓ ${escapeHTML(mesh.userData.textureName || 'Aplicada')}` : 'Sin textura'}
         </div>
         <button class="prop-btn prop-btn-accent" id="btn-apply-tex" style="margin-bottom:6px">
           <span class="material-symbols-rounded">texture</span>

@@ -26,6 +26,17 @@ import {
   splitVoxelStateBySelection,
 } from './editor/PixelUtils.js';
 import { createVoxelMesh } from './import/VoxelJSONLoader.js';
+import { EngineEditor } from './engine/EngineEditor.js';
+import { disposeGameObject, parseGameObject, reidentifyGameObjects } from './engine/GameAssets.js';
+import { attachPreservingWorld, authoredParent, setLocalMatrix } from './core/AuthoringTransforms.js';
+import { selectionRoots, captureSceneRemoval, removeSceneTrees, restoreSceneTrees } from './core/SceneEdits.js';
+import { captureProjectScene, cloneEditorObject, normalizeProjectDocument, prepareProjectScene, projectTextureSources } from './project/ProjectDocument.js';
+import { ProjectLoader, yieldProjectLoad } from './project/ProjectLoader.js';
+import { ProjectAutosave, indexedDBDraftStore } from './project/ProjectAutosave.js';
+import { loadProjectAssets, restoreEditorReferences } from './project/ProjectAssets.js';
+import { normalizeEngineSettings } from './project/EngineSettings.js';
+import { normalizeMapLayers } from './engine/MapLayers.js';
+import { disposeResources } from './engine/ResourceLibrary.js';
 import {
   MODEL_ACCEPT,
   MODEL_EXTENSIONS,
@@ -46,11 +57,19 @@ const hierarchy = new SceneHierarchy(scene);
 const vertexEditor = new VertexEditor(scene.scene);
 
 const AUTOSAVE_STORAGE_KEY = 'spriteforge3d.autosave.v1';
+const projectAutosave = new ProjectAutosave({ storage: {
+  getItem: key => localStorage.getItem(key), setItem: (key, value) => localStorage.setItem(key, value),
+}, durable: indexedDBDraftStore(window.indexedDB), key: AUTOSAVE_STORAGE_KEY });
+let autosaveSequence = 0;
 let autosaveTimer = null;
 let isRestoringProject = false;
+let engineEditor = null;
+let hasUnrestoredAutosave = false;
+let projectBaseAssets = [];
 
 function scheduleAutosave() {
   if (isRestoringProject) return;
+  hasUnrestoredAutosave = false;
   if (autosaveTimer) clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(() => {
     autosaveTimer = null;
@@ -59,14 +78,25 @@ function scheduleAutosave() {
 }
 
 function persistProjectSnapshot(project = null) {
-  if (isRestoringProject) return;
+  if (isRestoringProject || (hasUnrestoredAutosave && !project)) return;
   try {
     const snapshot = project || serializeProject();
     snapshot.savedAt = Date.now();
-    localStorage.setItem(AUTOSAVE_STORAGE_KEY, JSON.stringify(snapshot));
+    const sequence = ++autosaveSequence;
+    const status = document.getElementById('engine-project-status');
+    if (status) { status.textContent = 'Guardando borrador…'; status.dataset.state = 'saving'; }
+    projectAutosave.save(snapshot).then(() => {
+      if (sequence !== autosaveSequence || !status) return;
+      status.textContent = 'Borrador guardado en este navegador'; status.dataset.state = 'saved';
+    }).catch(error => {
+      console.warn('Could not autosave project:', error);
+      if (sequence !== autosaveSequence || !status) return;
+      status.textContent = 'No se pudo guardar el borrador. Descargá una copia .s3d.'; status.dataset.state = 'error';
+    });
   } catch (err) {
-    // localStorage can be unavailable or full (for example with very large sprites).
     console.warn('Could not autosave project:', err);
+    const status = document.getElementById('engine-project-status');
+    if (status) { status.textContent = 'No se pudo guardar el borrador. Descargá una copia .s3d.'; status.dataset.state = 'error'; }
   }
 }
 
@@ -82,18 +112,24 @@ function flushAutosave() {
 // Wrapping it keeps autosave in sync with undo/redo as well.
 const originalHistoryPush = history.push.bind(history);
 history.push = (action) => {
+  engineEditor?.reconcilePlacements();
   originalHistoryPush(action);
+  engineEditor?.mapRenderer.invalidate();
   scheduleAutosave();
 };
 const originalHistoryUndo = history.undo.bind(history);
 history.undo = () => {
   const action = originalHistoryUndo();
+  if (action) engineEditor?.reconcilePlacements();
+  if (action) engineEditor?.mapRenderer.invalidate();
   if (action) scheduleAutosave();
   return action;
 };
 const originalHistoryRedo = history.redo.bind(history);
 history.redo = () => {
   const action = originalHistoryRedo();
+  if (action) engineEditor?.reconcilePlacements();
+  if (action) engineEditor?.mapRenderer.invalidate();
   if (action) scheduleAutosave();
   return action;
 };
@@ -118,10 +154,13 @@ let vertexGestureSnapshot = null;
 let reliefSelectionSnapshot = null;
 
 function captureTransformSnapshot(objects) {
-  return (objects || []).map(mesh => ({
+  return (objects || []).map(mesh => {
+    mesh.updateWorldMatrix(true, false);
+    return {
     mesh,
     matrix: mesh.matrixWorld.clone(),
-  }));
+    };
+  });
 }
 
 function restoreTransformSnapshot(snapshot) {
@@ -134,7 +173,7 @@ function restoreTransformSnapshot(snapshot) {
         ? mesh.parent.matrixWorld.clone().invert()
         : new THREE.Matrix4().identity();
       const localMatrix = parentInverse.multiply(state.matrix);
-      localMatrix.decompose(mesh.position, mesh.quaternion, mesh.scale);
+      setLocalMatrix(mesh, localMatrix);
     } else {
       mesh.position.set(...state.position);
       mesh.rotation.set(...state.rotation);
@@ -494,6 +533,7 @@ cutTool.onCutComplete = (results) => {
 // When selection changes in SceneManager → update panels
 // When selection changes in SceneManager → update panels
 scene.onSelectionChanged = (selection) => {
+  engineEditor?.refreshSelection();
   if (selection.length === 1) {
     propsPanel.showProperties(selection[0]);
     if (toolMode === 'voxel-relief') {
@@ -503,7 +543,7 @@ scene.onSelectionChanged = (selection) => {
       voxelBrushTool.setTargetMesh(selection[0].userData.voxelized ? selection[0] : null);
     }
   } else if (selection.length > 1) {
-    propsPanel.showProperties({ name: `${selection.length} objects selected`, isMulti: true });
+    propsPanel.showMultiple(selection.length);
   } else {
     propsPanel.showEmpty();
   }
@@ -550,6 +590,7 @@ scene.onTransformEnd = () => {
 };
 
 scene.onObjectChanged = () => {
+  engineEditor?.reconcilePlacements(scene.selectedObjects);
   scene.selectedObjects.forEach(updateTextureRepeatForScale);
   if (scene.selectedObjects.length === 1 && !isVertexEditMode) {
     propsPanel.updateFromTransform(scene.selectedObjects[0]);
@@ -1035,11 +1076,6 @@ propsPanel.onApplyTexture = async (mesh) => {
   pushAppearanceHistory(mesh, 'Apply Texture', before, after);
 };
 
-// Scene hierarchy selection
-hierarchy.onSelect = (obj) => {
-  propsPanel.showProperties(obj);
-};
-
 hierarchy.onDelete = (obj) => {
   if (!scene.selectedObjects.includes(obj)) scene.selectObject(obj, false);
   deleteSelected({ forceObjects: true });
@@ -1064,7 +1100,7 @@ function selectHierarchyItems(items) {
 function restoreHierarchyParents(states) {
   scene.deselectObject();
   states.forEach(({ item, parent }) => {
-    (parent || scene.exportGroup).attach(item);
+    attachPreservingWorld(parent || scene.exportGroup, item);
   });
   selectHierarchyItems(states.map(state => state.item));
   hierarchy.refresh();
@@ -1079,7 +1115,7 @@ function moveHierarchyItems(items, targetGroup = null) {
   const states = movable.map(item => ({ item, parent: item.parent }));
   if (states.every(({ parent }) => parent === destination)) return;
 
-  movable.forEach(item => destination.attach(item));
+  movable.forEach(item => attachPreservingWorld(destination, item));
   selectHierarchyItems(movable);
   hierarchy.refresh();
 
@@ -1088,7 +1124,7 @@ function moveHierarchyItems(items, targetGroup = null) {
     undo: () => restoreHierarchyParents(states),
     redo: () => {
       scene.deselectObject();
-      movable.forEach(item => destination.attach(item));
+      movable.forEach(item => attachPreservingWorld(destination, item));
       selectHierarchyItems(movable);
       hierarchy.refresh();
     },
@@ -1113,7 +1149,7 @@ function createGroupFromDrop(items, target) {
     label: 'Group by Drag and Drop',
     undo: () => {
       scene.deselectObject();
-      previousParents.forEach(({ item, parent }) => (parent || scene.exportGroup).attach(item));
+      previousParents.forEach(({ item, parent }) => attachPreservingWorld(parent || scene.exportGroup, item));
       scene.exportGroup.remove(group);
       const index = scene.groups.indexOf(group);
       if (index >= 0) scene.groups.splice(index, 1);
@@ -1621,10 +1657,22 @@ document.getElementById('btn-add-cylinder').addEventListener('click', () => plac
 // ──────────────────────────────────────────────
 
 function duplicateSelected() {
-  const selection = [...scene.selectedObjects];
+  const selection = selectionRoots(scene.selectedObjects);
   if (selection.length === 0) return;
 
-  const clones = selection.map(obj => QuadFactory.duplicate(obj));
+  const clones = selection.map(obj => {
+    const clone = cloneEditorObject(obj);
+    obj.updateWorldMatrix(true, false); scene.exportGroup.updateWorldMatrix(true, false);
+    setLocalMatrix(clone, scene.exportGroup.matrixWorld.clone().invert().multiply(obj.matrixWorld));
+    clone.name += ' Copy'; clone.position.x += scene.snapSize; clone.position.z += scene.snapSize;
+    if (obj.userData.isSceneGroup) clone.userData.type = 'engine-object';
+    clone.traverse(node => {
+      delete node.userData.mapCell;
+      delete node.userData.isSceneGroup;
+    });
+    return clone;
+  });
+  reidentifyGameObjects(clones);
 
   scene.deselectObject();
   clones.forEach(clone => {
@@ -1649,20 +1697,6 @@ function duplicateSelected() {
   showToast(`Duplicated ${selection.length} object(s)`);
 }
 
-function detachObjectForHistory(obj) {
-  scene.deselectObject(obj);
-  if (obj.userData.isSceneGroup) {
-    if (obj.parent) obj.parent.remove(obj);
-    const groupIndex = scene.groups.indexOf(obj);
-    if (groupIndex >= 0) scene.groups.splice(groupIndex, 1);
-  } else {
-    if (obj.parent) obj.parent.remove(obj);
-    const objectIndex = scene.objects.indexOf(obj);
-    if (objectIndex >= 0) scene.objects.splice(objectIndex, 1);
-  }
-  scene._updateObjectCount();
-}
-
 function restoreObjectFromHistory(obj) {
   if (obj.userData.isSceneGroup) {
     if (!scene.groups.includes(obj)) scene.groups.push(obj);
@@ -1677,7 +1711,7 @@ function restoreObjectFromHistory(obj) {
 }
 
 function deleteSelected({ forceObjects = false } = {}) {
-  const selection = [...scene.selectedObjects];
+  const selection = selectionRoots(scene.selectedObjects);
   if (selection.length === 0) return;
 
   const voxelTarget = selection.length === 1 && selection[0].userData?.voxelized
@@ -1693,18 +1727,20 @@ function deleteSelected({ forceObjects = false } = {}) {
 
   const count = selection.length;
 
-  selection.forEach(detachObjectForHistory);
+  scene.deselectObject();
+  const removal = captureSceneRemoval(scene, selection);
+  removeSceneTrees(scene, removal);
   hierarchy.refresh();
 
   history.push({
     label: `Delete ${count} object(s)`,
     undo: () => {
-      selection.forEach(restoreObjectFromHistory);
+      restoreSceneTrees(scene, removal);
       selection.forEach(obj => scene.selectObject(obj, true));
       hierarchy.refresh();
     },
     redo: () => {
-      selection.forEach(detachObjectForHistory);
+      scene.deselectObject(); removeSceneTrees(scene, removal);
       hierarchy.refresh();
     }
   });
@@ -1715,7 +1751,7 @@ function deleteSelected({ forceObjects = false } = {}) {
 function updateGroupingActions(selection = scene.selectedObjects) {
   const selected = selection || [];
   const hasGroup = selected.some(object => object.userData?.isSceneGroup);
-  const hasGroupedObject = selected.some(object => object.parent?.userData?.isSceneGroup);
+  const hasGroupedObject = selected.some(object => authoredParent(object)?.userData?.isSceneGroup);
   const canGroup = selected.length >= 2 && !hasGroup && !hasGroupedObject;
   const canUngroup = selected.some(object => object.userData?.isSceneGroup);
 
@@ -2045,8 +2081,14 @@ document.getElementById('btn-export-unreal').addEventListener('click', async () 
 window.addEventListener('blur', () => cameraKeys.clear());
 
 window.addEventListener('keydown', (e) => {
+  if (isRestoringProject) {
+    if (e.key === 'Escape') { projectLoader.cancel(); e.preventDefault(); }
+    else if (!projectLoadOverlay.contains(e.target)) e.preventDefault();
+    return;
+  }
   // Ignore if typing in an input
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (engineEditor?.runtime) return;
+  if (e.target.closest?.('input, textarea, select, [contenteditable="true"]')) return;
 
   const key = e.key.toLowerCase();
   if (!e.ctrlKey && !e.metaKey && !e.altKey && cameraMovementKeys.has(key)) {
@@ -2095,6 +2137,9 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'l':
       setToolMode('line');
+      break;
+    case 'f':
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); engineEditor?.frameView(); }
       break;
     case 'b':
       setToolMode('rectangle');
@@ -2147,7 +2192,8 @@ function showToast(message) {
 
   toast = document.createElement('div');
   toast.classList.add('toast');
-  toast.innerHTML = `<span class="material-symbols-rounded">check_circle</span>${message}`;
+  const icon = document.createElement('span'); icon.className = 'material-symbols-rounded'; icon.textContent = 'check_circle';
+  toast.append(icon, document.createTextNode(String(message)));
   document.body.appendChild(toast);
 
   if (toastTimeout) clearTimeout(toastTimeout);
@@ -2177,98 +2223,22 @@ function getMeshTextureDataUrl(mesh) {
 }
 
 function serializeProject() {
-  const assets = new Map(
-    assetPanel.assets.map(asset => [asset.name, {
-      name: asset.name,
-      dataUrl: asset.dataUrl,
-    }]),
-  );
-
-  // Textures loaded directly on an object also need to be embedded.
-  scene.objects.forEach(obj => {
-    const textureName = obj.userData.textureName || '';
-    const dataUrl = getMeshTextureDataUrl(obj);
-    if (textureName && dataUrl && !assets.has(textureName)) {
-      assets.set(textureName, { name: textureName, dataUrl });
-    }
-  });
-
+  const assets = new Map(assetPanel.assets.map(asset => [asset.name, { name: asset.name, dataUrl: asset.dataUrl }]));
+  scene.objects.forEach(root => root.traverse(object => {
+    const name = object.userData.textureName;
+    const dataUrl = getMeshTextureDataUrl(object);
+    if (name && dataUrl && !assets.has(name)) assets.set(name, { name, dataUrl });
+  }));
   return {
-    version: 2,
+    version: 4, ...captureProjectScene(scene), engine: engineEditor?.serialize(),
     assets: [...assets.values()],
-    modelAssets: assetPanel.modelAssets.map(asset => ({
-      name: asset.name,
-      format: asset.format,
-      sourceBase64: asset.sourceBase64,
-    })),
-    objects: scene.objects.map(obj => {
-      const pos = obj.position;
-      const rot = obj.rotation;
-      const scl = obj.scale;
-      const importedAsset = obj.userData.type === 'imported-3d'
-        ? assetPanel.modelAssets.find(asset => asset.name === obj.userData.imported3DName)
-        : null;
-      return {
-        name: obj.name,
-        type: obj.userData.type,
-        imported3DFormat: obj.userData.imported3DFormat || null,
-        imported3DAssetName: importedAsset?.name || null,
-        imported3DSource: importedAsset ? null : (obj.userData.imported3DSource || null),
-        textureName: obj.userData.textureName || '',
-        originalWidth: obj.userData.originalWidth,
-        originalHeight: obj.userData.originalHeight,
-        extrusionDepth: obj.userData.extrusionDepth,
-        textureSides: obj.userData.textureSides !== false,
-        realUVApplied: !!obj.userData.realUVApplied,
-        uvLayoutType: obj.userData.uvLayoutType || '',
-        position: [pos.x, pos.y, pos.z],
-        rotation: [rot.x, rot.y, rot.z],
-        scale: [scl.x, scl.y, scl.z],
-        uvRepeat: obj.userData.uvRepeat || [1, 1],
-        uvOffset: obj.userData.uvOffset || [0, 0],
-        textureRepeatOnScale: !!obj.userData.textureRepeatOnScale,
-        textureRepeatBaseScale: obj.userData.textureRepeatBaseScale || null,
-        textureRepeatBaseUV: obj.userData.textureRepeatBaseUV || null,
-        voxelSource: obj.userData.voxelSource || null,
-        voxelSize: obj.userData.voxelSize || 1,
-        voxelized: !!obj.userData.voxelized,
-        voxelPixelSize: obj.userData.voxelPixelSize || 1,
-        voxelUsesUVRepeat: !!obj.userData.voxelUsesUVRepeat,
-        voxelRepeat: obj.userData.voxelRepeat || null,
-        voxelScaleCompensation: obj.userData.voxelScaleCompensation || null,
-        voxelSourceScale: obj.userData.voxelSourceScale || null,
-        voxelPreviousTextureRepeatOnScale: obj.userData.voxelPreviousTextureRepeatOnScale ?? null,
-        voxelPreviousTextureRepeatBaseScale: obj.userData.voxelPreviousTextureRepeatBaseScale || null,
-        voxelPreviousTextureRepeatBaseUV: obj.userData.voxelPreviousTextureRepeatBaseUV || null,
-        voxelActiveMap: obj.userData.voxelActiveMap ? Array.from(obj.userData.voxelActiveMap) : null,
-        voxelColorMap: obj.userData.voxelColorMap ? Array.from(obj.userData.voxelColorMap) : null,
-        voxelDepthMap: obj.userData.voxelDepthMap ? Array.from(obj.userData.voxelDepthMap) : null,
-        voxelPivotOffset: obj.userData.voxelPivotOffset || null,
-        voxelDerivedPiece: !!obj.userData.voxelDerivedPiece,
-        voxelHeightmapSource: obj.userData.voxelHeightmapSource || null,
-        voxelHeightmapName: obj.userData.voxelHeightmapName || null,
-        voxelHeightMax: obj.userData.voxelHeightMax ?? 8,
-        voxelHeightInvert: !!obj.userData.voxelHeightInvert,
-        voxelColor: obj.userData.type === 'voxel-json' && obj.material?.color
-          ? obj.material.color.getHex()
-          : null,
-      };
-    }),
-    groups: scene.groups.map(group => ({
-      name: group.name,
-      position: [group.position.x, group.position.y, group.position.z],
-      rotation: [group.rotation.x, group.rotation.y, group.rotation.z],
-      scale: [group.scale.x, group.scale.y, group.scale.z],
-      children: group.children
-        .map(child => scene.objects.indexOf(child))
-        .filter(index => index >= 0),
-    })),
+    modelAssets: assetPanel.modelAssets.map(({ name, format, sourceBase64 }) => ({ name, format, sourceBase64 })),
   };
 }
 
-async function saveProject() {
+async function saveProject({ download = false } = {}) {
   let fileHandle = null;
-  if (window.showSaveFilePicker) {
+  if (window.showSaveFilePicker && !download) {
     try {
       fileHandle = await window.showSaveFilePicker({
         suggestedName: 'project.s3d',
@@ -2285,7 +2255,9 @@ async function saveProject() {
 
   showToast('Saving project...');
 
-  const project = serializeProject();
+  let project;
+  try { project = serializeProject(); }
+  catch (error) { showToast(`No se pudo guardar: ${error.message}`); return; }
 
   const json = JSON.stringify(project);
 
@@ -2303,176 +2275,165 @@ async function saveProject() {
   } else {
     // Fallback for browsers without File System Access API
     const blob = new Blob([json], { type: 'application/json' });
-    const reader = new FileReader();
-    reader.onload = () => {
-      const url = reader.result;
-      const a = document.createElement('a');
-      a.style.display = 'none';
-      a.href = url;
-      a.download = 'project.s3d';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => document.body.removeChild(a), 1000);
-    };
-    reader.readAsDataURL(blob);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'project.s3d';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     persistProjectSnapshot(project);
     showToast('Project saved!');
   }
 }
 
-function newProject() {
-  const hasProjectContent = scene.objects.length > 0
-    || scene.referenceGroup.children.length > 0
-    || assetPanel.assets.length > 0
-    || assetPanel.modelAssets.length > 0;
+const projectLoadOverlay = document.createElement('section');
+projectLoadOverlay.className = 'project-load-overlay'; projectLoadOverlay.hidden = true;
+projectLoadOverlay.setAttribute('role', 'dialog'); projectLoadOverlay.setAttribute('aria-modal', 'true');
+projectLoadOverlay.setAttribute('aria-label', 'Abriendo proyecto');
+projectLoadOverlay.innerHTML = '<div class="project-load-card"><strong>Abriendo proyecto…</strong><p>Validando recursos y preparando la escena. El proyecto actual se conserva hasta terminar.</p><button type="button">Cancelar carga</button></div>';
+document.body.append(projectLoadOverlay);
+let projectLoadPreviousFocus = null;
 
-  if (hasProjectContent && !window.confirm('¿Crear un proyecto nuevo? Se quitará el contenido actual del editor.')) {
-    return;
-  }
-
-  if (autosaveTimer) {
-    clearTimeout(autosaveTimer);
-    autosaveTimer = null;
-  }
-
-  isRestoringProject = true;
-  try {
-    vertexEditor.disable();
-    isVertexEditMode = false;
-    document.getElementById('btn-vertex-edit')?.classList.remove('active');
-
-    scene.clear();
-    history.clear();
-
-    assetPanel.assets.forEach(asset => asset.texture?.dispose());
-    assetPanel.assets = [];
-    assetPanel.clearSelection();
-    if (assetPanel.assetGrid) assetPanel.assetGrid.innerHTML = '';
-    assetPanel.clearModelAssets();
-
-    transformGestureSnapshot = null;
-    vertexGestureSnapshot = null;
-    reliefDirectSnapshot = null;
-    reliefSelectionSnapshot = null;
-    brushStrokeSnapshot = null;
-
-    setToolMode('transform');
-    propsPanel.showEmpty();
-    hierarchy.refresh();
-  } finally {
-    isRestoringProject = false;
-  }
-
-  persistProjectSnapshot({
-    version: 2,
-    assets: [],
-    modelAssets: [],
-    objects: [],
-    groups: [],
-  });
-  updateBeginnerGuide();
-  showToast('Nuevo proyecto listo');
+function disposePreparedProject(prepared) {
+  disposeGameObject(prepared.scene.root);
+  [...prepared.assets, ...prepared.baseAssets].forEach(asset => asset.texture.dispose());
+  disposeResources(prepared.engine.library);
 }
 
-function loadProject(file) {
-  const reader = new FileReader();
-  reader.onload = (e) => {
+const projectLoader = new ProjectLoader({
+  onBusy: busy => {
+    isRestoringProject = busy;
+    projectLoadOverlay.hidden = !busy;
+    for (const element of [document.getElementById('app'), document.getElementById('toolbar'), document.querySelector('.engine-toolbar'), document.querySelector('.engine-panel-switcher')]) if (element) element.inert = busy;
+    if (busy) { projectLoadPreviousFocus = document.activeElement; projectLoadOverlay.querySelector('button').focus(); }
+    else if (projectLoadPreviousFocus?.isConnected) projectLoadPreviousFocus.focus();
+    else canvas.focus();
+  },
+  prepare: async (input, signal) => {
+    await yieldProjectLoad(signal);
+    if (typeof input?.text === 'function') input = await input.text();
+    const project = normalizeProjectDocument(typeof input === 'string' ? JSON.parse(input) : input);
+    normalizeEngineSettings(project.engine ?? {});
+    let assets = []; let baseAssets = []; let preparedScene; let engine;
     try {
-      restoreProjectData(JSON.parse(e.target.result), { announce: true });
-    } catch (err) {
-      showToast('Error loading project');
-      console.error(err);
+      const known = new Set(project.assets.map(asset => asset.dataUrl));
+      const extra = projectTextureSources(project).filter(url => !known.has(url)).map((dataUrl, index) => ({ name: `@base-${index}`, dataUrl }));
+      const loaded = await loadProjectAssets([...project.assets, ...extra], signal);
+      assets = loaded.slice(0, project.assets.length); baseAssets = loaded.slice(project.assets.length);
+      const modelAssets = structuredClone(project.modelAssets);
+      preparedScene = await prepareProjectScene(project, {
+        signal, legacyObject: async data => (await reconstructObjects([data], { assets, modelAssets }))[0],
+      });
+      restoreEditorReferences(preparedScene.root, assets, baseAssets);
+      engine = await engineEditor.prepare(project.engine, preparedScene.objects, signal);
+      normalizeMapLayers(engine.settings, preparedScene.objects);
+      return { scene: preparedScene, assets, baseAssets, modelAssets, engine };
+    } catch (error) {
+      if (preparedScene) disposeGameObject(preparedScene.root);
+      [...assets, ...baseAssets].forEach(asset => asset.texture.dispose());
+      if (engine) disposeResources(engine.library);
+      throw error;
     }
-  };
-  reader.readAsText(file);
-}
-
-function restoreProjectData(project, { announce = false } = {}) {
-  if (!project?.assets || !project?.objects) throw new Error('Invalid project file');
-
-  isRestoringProject = true;
-
-  // Clear current state.
-  scene.clear();
-  hierarchy.refresh();
-  history.clear();
-  propsPanel.showEmpty();
-
-  // Clear UI assets.
-  assetPanel.assets = [];
-  assetPanel.selectedAsset = null;
-  document.getElementById('asset-grid').innerHTML = '';
-  assetPanel.clearModelAssets();
-  (Array.isArray(project.modelAssets) ? project.modelAssets : []).forEach(asset => {
-    assetPanel.addModelAsset(asset);
-  });
-
-  const finish = async () => {
-    try {
-      const restoredObjects = await reconstructObjects(project.objects);
-      restoreGroups(project.groups, restoredObjects);
-      persistProjectSnapshot(project);
-      if (typeof updateBeginnerGuide === 'function') updateBeginnerGuide();
-      if (announce) showToast('Project loaded successfully');
-    } catch (err) {
-      console.error('Could not restore project objects:', err);
-      showToast(`No se pudo restaurar un modelo: ${err.message}`);
-    } finally {
-      isRestoringProject = false;
-    }
-  };
-
-  const assetDataList = Array.isArray(project.assets) ? project.assets : [];
-  if (assetDataList.length === 0) {
-    finish();
-    return;
-  }
-
-  let loadedAssets = 0;
-  const handleAssetLoaded = () => {
-    loadedAssets += 1;
-    if (loadedAssets === assetDataList.length) finish();
-  };
-
-  assetDataList.forEach(assetData => {
-    const img = new Image();
-    img.onload = () => {
-      const texture = new THREE.Texture(img);
-      texture.needsUpdate = true;
-      texture.colorSpace = THREE.SRGBColorSpace;
-      texture.magFilter = THREE.NearestFilter;
-      texture.minFilter = THREE.NearestMipMapLinearFilter;
-
-      const asset = { name: assetData.name, texture, image: img, dataUrl: assetData.dataUrl };
-      assetPanel.assets.push(asset);
-      assetPanel._addThumbnail(asset);
-      handleAssetLoaded();
+  },
+  commit: prepared => {
+    const previous = {
+      root: scene.exportGroup, objects: scene.objects, groups: scene.groups, references: scene.referenceGroup,
+      selection: [...scene.selectedObjects], assets: assetPanel.assets, baseAssets: projectBaseAssets, modelAssets: assetPanel.modelAssets,
+      assetNodes: [...assetPanel.assetGrid.childNodes], modelNodes: [...assetPanel.modelAssetGrid.childNodes],
+      selectedAsset: assetPanel.selectedAsset, selectedAssets: assetPanel.selectedAssets, selectedModelAsset: assetPanel.selectedModelAsset,
+      slicerDisplay: assetPanel.slicerControls?.style.display,
     };
-    img.onerror = handleAssetLoaded;
-    img.src = assetData.dataUrl;
-  });
-}
+    let previousEngine;
+    try {
+      scene.deselectObject();
+      vertexEditor.disable(); isVertexEditMode = false;
+      document.getElementById('btn-vertex-edit').classList.remove('active');
+      previous.root.removeFromParent(); previous.references.removeFromParent();
+      scene.exportGroup = prepared.scene.root; scene.objects = prepared.scene.objects; scene.groups = prepared.scene.groups;
+      scene.referenceGroup = new THREE.Group(); scene.referenceGroup.name = 'ReferenceImages';
+      scene.scene.add(scene.exportGroup, scene.referenceGroup);
+      assetPanel.assets = prepared.assets; assetPanel.modelAssets = prepared.modelAssets; projectBaseAssets = prepared.baseAssets;
+      assetPanel.assetGrid.replaceChildren(); assetPanel.modelAssetGrid.replaceChildren();
+      assetPanel.assets.forEach(asset => assetPanel._addThumbnail(asset));
+      assetPanel.modelAssets.forEach(asset => assetPanel._addModelThumbnail(asset));
+      assetPanel.clearSelection();
+      previousEngine = engineEditor.swapPrepared(prepared.engine);
+      engineEditor.refreshProjectUI();
+      scene._updateObjectCount(); hierarchy.refresh(); propsPanel.showEmpty(); updateBeginnerGuide();
+      transformGestureSnapshot = vertexGestureSnapshot = reliefDirectSnapshot = reliefSelectionSnapshot = brushStrokeSnapshot = null;
+      history.clear();
+    } catch (error) {
+      scene.exportGroup.removeFromParent(); scene.referenceGroup.removeFromParent();
+      scene.exportGroup = previous.root; scene.objects = previous.objects; scene.groups = previous.groups; scene.referenceGroup = previous.references;
+      scene.scene.add(previous.root, previous.references);
+      assetPanel.assets = previous.assets; assetPanel.modelAssets = previous.modelAssets; projectBaseAssets = previous.baseAssets;
+      assetPanel.assetGrid.replaceChildren(...previous.assetNodes); assetPanel.modelAssetGrid.replaceChildren(...previous.modelNodes);
+      assetPanel.selectedAsset = previous.selectedAsset; assetPanel.selectedAssets = previous.selectedAssets; assetPanel.selectedModelAsset = previous.selectedModelAsset;
+      if (assetPanel.slicerControls) assetPanel.slicerControls.style.display = previous.slicerDisplay;
+      if (previousEngine) engineEditor.swapPrepared(previousEngine);
+      engineEditor.refreshProjectUI();
+      previous.selection.forEach(object => scene.selectObject(object, true));
+      scene._updateObjectCount(); hierarchy.refresh(); updateBeginnerGuide();
+      throw error;
+    }
+    try {
+      disposeGameObject(previous.root); disposeGameObject(previous.references);
+      [...previous.assets, ...previous.baseAssets].forEach(asset => asset.texture.dispose());
+      disposeResources(previousEngine.library);
+      scene.frameObjects([scene.exportGroup]);
+    } catch (error) { console.warn('Old project cleanup failed:', error); }
+  },
+  dispose: disposePreparedProject,
+});
+projectLoadOverlay.querySelector('button').onclick = () => { projectLoader.cancel(); showToast('Carga cancelada. El proyecto actual se conserva.'); };
 
-function restoreAutosavedProject() {
-  try {
-    const raw = localStorage.getItem(AUTOSAVE_STORAGE_KEY);
-    if (!raw) return;
-    const project = JSON.parse(raw);
-    if (!project?.objects?.length && !project?.assets?.length) return;
-    restoreProjectData(project, { announce: false });
-    showToast('Borrador recuperado automáticamente');
-  } catch (err) {
-    console.warn('Could not restore autosaved project:', err);
+async function restoreProjectData(project, { announce = false, fromAutosave = false } = {}) {
+  engineEditor?.stop(); engineEditor?.setMode('select'); engineEditor?.onPreparePlay();
+  document.activeElement?.blur();
+  if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null; }
+  if (!fromAutosave) persistProjectSnapshot();
+  const loaded = await projectLoader.load(project);
+  if (loaded) {
+    hasUnrestoredAutosave = false; persistProjectSnapshot();
+    if (announce) showToast('Proyecto abierto correctamente');
   }
+  return loaded;
 }
 
-async function reconstructObjects(objectDataList) {
+async function newProject() {
+  const hasContent = scene.objects.length || scene.groups.length || scene.referenceGroup.children.length || assetPanel.assets.length || assetPanel.modelAssets.length || engineEditor.settings.templates.length;
+  if (hasContent && !window.confirm('¿Crear un proyecto nuevo? Se quitará el contenido actual del editor.')) return;
+  try {
+    if (await restoreProjectData({ version: 4, assets: [], modelAssets: [], objects: [], groups: [], engine: {} })) showToast('Nuevo proyecto listo');
+  } catch (error) { showToast(`No se pudo crear el proyecto: ${error.message}`); }
+}
+
+async function loadProject(file) {
+  try { await restoreProjectData(file, { announce: true }); }
+  catch (error) { showToast(`No se pudo abrir: ${error.message}. El proyecto actual se conserva.`); console.warn('Project load rejected:', error); }
+}
+
+async function restoreAutosavedProject() {
+  hasUnrestoredAutosave = true;
+  const revision = projectLoader.revision;
+  try {
+    const raw = await projectAutosave.read();
+    // A user-started project or edit takes precedence over late startup recovery.
+    if (revision !== projectLoader.revision || history.canUndo() || scene.objects.length || scene.groups.length || assetPanel.assets.length || assetPanel.modelAssets.length || scene.referenceGroup.children.length || engineEditor.runtime || engineEditor.mode !== 'select') return;
+    if (!raw) { hasUnrestoredAutosave = false; return; }
+    if (await restoreProjectData(raw, { fromAutosave: true })) showToast('Borrador recuperado automáticamente');
+  } catch (error) { console.warn('Could not restore autosaved project:', error); showToast('No se pudo recuperar el borrador; no se sobrescribió. Podés abrir una copia .s3d.'); }
+}
+
+async function reconstructObjects(objectDataList, { assets, modelAssets }) {
   const reconstructedObjects = [];
   for (const data of objectDataList) {
     let mesh;
     let baseTex = null;
     if (data.textureName) {
-      const asset = assetPanel.assets.find(a => a.name === data.textureName);
+      const asset = assets.find(a => a.name === data.textureName);
       if (asset) {
         baseTex = asset.texture.clone();
         baseTex.needsUpdate = true;
@@ -2481,11 +2442,13 @@ async function reconstructObjects(objectDataList) {
 
     const importedSource = data.imported3DSource || (
       data.imported3DAssetName
-        ? assetPanel.modelAssets.find(asset => asset.name === data.imported3DAssetName)?.sourceBase64
+        ? modelAssets.find(asset => asset.name === data.imported3DAssetName)?.sourceBase64
         : null
     );
 
-    if (data.type === 'imported-3d' && importedSource) {
+    if (data.type === 'engine-object' && data.engineScene) {
+      mesh = await parseGameObject(data.engineScene);
+    } else if (data.type === 'imported-3d' && importedSource) {
       const imported = await importModelSource(importedSource, {
         name: data.name,
         format: data.imported3DFormat,
@@ -2494,7 +2457,7 @@ async function reconstructObjects(objectDataList) {
       mesh.userData.imported3DFormat = data.imported3DFormat || imported.format;
       mesh.userData.imported3DSource = importedSource;
       mesh.userData.imported3DName = data.imported3DAssetName || data.name;
-      assetPanel.addModelAsset({
+      if (!modelAssets.some(asset => asset.sourceBase64 === importedSource)) modelAssets.push({
         name: data.imported3DAssetName || data.name,
         format: data.imported3DFormat || imported.format,
         sourceBase64: importedSource,
@@ -2532,13 +2495,16 @@ async function reconstructObjects(objectDataList) {
       } else {
         mesh = QuadFactory.createPlane(data.originalWidth, data.originalHeight);
       }
-    } else continue;
+    } else throw new Error(`Missing source data for ${data.name || data.type}`);
 
     mesh.name = data.name;
+    mesh.visible = data.visible !== false;
+    if (data.game) mesh.userData.game = structuredClone(data.game);
+    if (data.mapCell) mesh.userData.mapCell = structuredClone(data.mapCell);
     mesh.userData.textureName = data.textureName || '';
-    mesh.position.set(...data.position);
-    mesh.rotation.set(...data.rotation);
-    mesh.scale.set(...data.scale);
+    mesh.position.set(...(data.position || [0, 0, 0]));
+    mesh.rotation.set(...(data.rotation || [0, 0, 0]));
+    mesh.scale.set(...(data.scale || [1, 1, 1]));
 
     // Project files rebuild primitive geometry instead of serializing its
     // buffers. Restore the UV layout before restoring the texture so a
@@ -2593,38 +2559,15 @@ async function reconstructObjects(objectDataList) {
       applyMappingToMaterial(mesh.material);
     }
 
-    scene.addObject(mesh);
     reconstructedObjects.push(mesh);
   }
 
-  hierarchy.refresh();
   return reconstructedObjects;
-}
-
-function restoreGroups(groupDataList, restoredObjects) {
-  if (!Array.isArray(groupDataList)) return;
-
-  for (const data of groupDataList) {
-    const group = new THREE.Group();
-    group.name = data.name || 'Group';
-    group.userData.isSceneGroup = true;
-    group.position.set(...(data.position || [0, 0, 0]));
-    group.rotation.set(...(data.rotation || [0, 0, 0]));
-    group.scale.set(...(data.scale || [1, 1, 1]));
-    scene.exportGroup.add(group);
-    scene.groups.push(group);
-
-    (data.children || []).forEach(index => {
-      const child = restoredObjects[index];
-      if (child) group.add(child);
-    });
-  }
-
-  hierarchy.refresh();
 }
 
 document.getElementById('btn-new-project').addEventListener('click', newProject);
 document.getElementById('btn-save-project').addEventListener('click', saveProject);
+document.getElementById('btn-download-project').addEventListener('click', () => saveProject({ download: true }));
 
 document.getElementById('btn-load-project').addEventListener('click', () => {
   document.getElementById('file-load-project').click();
@@ -3051,8 +2994,13 @@ const cameraClock = new THREE.Clock();
 
 function animate() {
   requestAnimationFrame(animate);
-  scene.updateCameraMovement(cameraKeys, Math.min(cameraClock.getDelta(), 0.05));
-  scene.render();
+  const elapsed = cameraClock.getDelta();
+  const dt = Math.min(elapsed, 0.1);
+  if (!engineEditor?.render(dt)) {
+    scene.updateCameraMovement(cameraKeys, Math.min(dt, 0.05));
+    scene.render();
+  }
+  engineEditor?.afterRender(elapsed);
 }
 
 animate();
@@ -3078,28 +3026,43 @@ function setWorkflowState(activeStep, completedSteps = []) {
 }
 
 function updateBeginnerGuide() {
-  const objectCount = scene.exportGroup.children.length;
+  const objectCount = scene.objects.length;
   const hasObjects = objectCount > 0;
   const hasSelection = scene.selectedObjects.length > 0;
+  const painting = engineEditor && engineEditor.mode !== 'select';
+  const playing = !!engineEditor?.runtime;
+  const hidden = hasObjects || painting || playing;
 
-  welcomeCard?.classList.toggle('is-hidden', hasObjects);
-  welcomeCard?.setAttribute('aria-hidden', String(hasObjects));
+  welcomeCard?.classList.toggle('is-hidden', hidden);
+  welcomeCard?.setAttribute('aria-hidden', String(hidden));
+  if (welcomeCard) welcomeCard.inert = hidden;
+  document.getElementById('workflow-guide').hidden = playing;
+  document.getElementById('context-hint').hidden = playing;
   if (exportMenuButton) {
     exportMenuButton.disabled = !hasObjects;
     exportMenuButton.title = hasObjects ? 'Exportar modelo' : 'Primero importá o creá un objeto';
   }
 
-  if (!hasObjects) {
+  if (painting) {
     setWorkflowState('import');
-    if (contextHintText) contextHintText.textContent = 'Importá un sprite para empezar.';
+    if (contextHintText) contextHintText.textContent = 'Pintá sobre el suelo. Cada trazo se puede deshacer. Esc vuelve a Objetos.';
+  } else if (!hasObjects) {
+    setWorkflowState('import');
+    if (contextHintText) contextHintText.textContent = 'Creá un ejemplo jugable o pintá un mapa desde cero.';
   } else if (hasSelection) {
     setWorkflowState('edit', ['import']);
-    if (contextHintText) contextHintText.textContent = 'Usá Volumen para dar profundidad. Los ajustes técnicos están plegados.';
+    if (contextHintText) contextHintText.textContent = 'Configurá colisiones, eventos o JavaScript en Objeto de juego. Aplicá los cambios y probalos con Jugar.';
+  } else if (engineEditor?.hasTestedProject) {
+    setWorkflowState('export', ['import', 'edit']);
+    if (contextHintText) contextHintText.textContent = 'Seguí creando tu mapa o elegí Exportar juego para descargar el HTML jugable.';
   } else {
     setWorkflowState('edit', ['import']);
-    if (contextHintText) contextHintText.textContent = 'Seleccioná un objeto para continuar editándolo.';
+    if (contextHintText) contextHintText.textContent = 'Seleccioná un objeto para agregar comportamiento o elegí Jugar para probar el mapa. F encuadra la vista.';
   }
 }
+
+document.getElementById('btn-quick-game')?.addEventListener('click', () => engineEditor?.addDemo());
+document.getElementById('btn-quick-map')?.addEventListener('click', () => engineEditor?.setMode('paint'));
 
 document.getElementById('btn-quick-import')?.addEventListener('click', () => {
   document.getElementById('file-input')?.click();
@@ -3128,12 +3091,26 @@ sceneTreeObserver.observe(document.getElementById('scene-tree'), { childList: tr
 updateGroupingActions();
 updateExportScopeLabel();
 updateBeginnerGuide();
-showToast('Todo listo: importá un PNG y lo ubicamos por vos.');
+showToast('Todo listo: creá un ejemplo jugable o pintá tu primer mapa.');
 
 window.addEventListener('pagehide', flushAutosave);
 window.addEventListener('beforeunload', flushAutosave);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') flushAutosave();
+});
+
+engineEditor = new EngineEditor({
+  scene, history, assetPanel, toast: showToast,
+  onChange: () => { hierarchy.refresh(); updateBeginnerGuide(); },
+  onWorkflowChange: () => updateBeginnerGuide(),
+  onPreparePlay: () => {
+    cameraKeys.clear();
+    closeToolWheel();
+    vertexEditor.disable();
+    isVertexEditMode = false;
+    document.getElementById('btn-vertex-edit').classList.remove('active');
+    setToolMode('transform');
+  },
 });
 
 restoreAutosavedProject();

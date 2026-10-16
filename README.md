@@ -4,6 +4,20 @@ Editor 3D en el navegador y pipeline automatizable para convertir sprites 2D en 
 
 ## Características
 
+### Motor de juegos v2 (en desarrollo)
+
+La rama `v2` incorpora herramientas de mapa con pintura, borrado y relleno rectangular; recursos reutilizables; componentes de jugador y colisión; eventos visuales y JavaScript; animación de sprite sheets; prueba con Jugar/Pausar/Detener y exportación de juegos HTML independientes. Elegí **Ejemplo jugable** para probar el recorrido completo.
+
+Abrí `examples/game-demo.s3d` para probar un proyecto completo con jugador animado, misión con llave y puerta, sombras, partículas, postprocesamiento e interfaz HTML que controla el mundo.
+
+Incluye gestión de capas con visibilidad y bloqueo, clips de animación con nombre y vista previa, selección automática de idle/walk, eventos con condiciones y acciones ordenadas, referencias entre objetos y colisiones con vista previa, ajuste visual, grupos y altura opcional. Los recursos tienen miniaturas, búsqueda, renombrado, actualización y borrado con deshacer. Los proyectos v4 conservan geometría editada, texturas y jerarquías; la carga valida y prepara el contenido antes de reemplazar la escena, y se puede cancelar. El ejemplo jugable permite recoger una llave, abrir una puerta condicionada y llegar a la meta. Consultá la [guía de creación de juegos](docs/GAME_AUTHORING.md), el [objetivo del motor](docs/ENGINE_V2.md) y el [estado de implementación](docs/ENGINE_V2_PROGRESS.md). El motor sigue en desarrollo: quedan mapas más heterogéneos, mejoras de autoría de scripts y refinamiento del flujo inicial.
+
+El dibujo de celdas compatibles usa instancias agrupadas, con estadísticas en **Rendimiento**. Las colisiones consultan un índice espacial y los borradores grandes se guardan en IndexedDB. El benchmark reproducible `npm run benchmark:engine -- --size 64` mide un mapa de 4.350 objetos; agregá `--project large-map.s3d` para probarlo en el editor. Las mediciones actuales están en `audit/engine-v2/map-benchmark-*.json`; todavía faltan mapas más heterogéneos y dispositivos variados.
+
+La interfaz del juego se crea con **HTML, CSS y JavaScript** desde **Interfaz HTML**: comparte variables, señales, control de objetos, mundo y pausa con el motor, y funciona en Jugar y en el HTML exportado. **Mundo y efectos** permite configurar luces y sombras, ciclo día/noche, emisores de partículas, bloom, exposición y viñeta. Los efectos también responden a eventos visuales y a `api.world`. El editor incluye plantillas de scripts, validación sin ejecución, diagnósticos con líneas, encuadre con F y un inicio orientado a crear mapas jugables. Las celdas siguen sus transformaciones para que pintar/borrar use la ubicación actual.
+
+### Editor de modelos
+
 - Importación de sprites PNG mediante selector, drag & drop o pegado desde el portapapeles.
 - Importación de modelos OBJ, GLTF/GLB, STL, PLY, FBX, DAE, DWG y DXF.
 - Importación de vóxeles JSON dispersos con formato `voxel-binary-sparse-v1`.

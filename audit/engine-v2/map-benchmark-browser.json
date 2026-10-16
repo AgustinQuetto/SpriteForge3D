@@ -1,0 +1,7 @@
+{
+  "observedAt": "2026-10-16T02:44:09.348Z",
+  "objects": 4350,
+  "batched": "4350 objetos · 4348 celdas agrupadas en 28 lotes · 30 llamadas de dibujo · 20.4 ms/cuadro",
+  "unbatched": "4350 objetos · 0 celdas agrupadas en 0 lotes · 4235 llamadas de dibujo · 51.1 ms/cuadro",
+  "note": "One-second frame averages from the same editor game camera on this machine. Includes simulation and GPU rendering; timings vary with load."
+}

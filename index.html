@@ -7,6 +7,7 @@
   <meta name="description" content="2D to 3D visual editor — convert sprites into low-poly 3D models for 2.5D games">
   <title>SpriteForge3D — Convertí sprites en modelos 3D</title>
   <link rel="stylesheet" href="/src/styles/index.css">
+  <link rel="stylesheet" href="/src/styles/engine.css">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link
     href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap"
@@ -227,6 +228,10 @@
             Abrir proyecto
             <span class="dropdown-shortcut">.s3d</span>
           </button>
+          <button id="btn-download-project" class="dropdown-item">
+            <span class="material-symbols-rounded">download</span>
+            Descargar copia .s3d
+          </button>
           <button id="btn-import-voxels" class="dropdown-item">
             <span class="material-symbols-rounded">deployed_code</span>
             Importar vóxeles
@@ -390,40 +395,44 @@
       <nav id="workflow-guide" class="workflow-guide" aria-label="Progreso del flujo">
         <div class="workflow-step active" data-step="import">
           <span class="workflow-number">1</span>
-          <span><strong>Importar</strong><small>PNG o JSON</small></span>
+          <span><strong>Mapa</strong><small>Pintá tu mundo</small></span>
         </div>
         <span class="workflow-line"></span>
         <div class="workflow-step" data-step="edit">
           <span class="workflow-number">2</span>
-          <span><strong>Dar volumen</strong><small>Ajustá el resultado</small></span>
+          <span><strong>Objetos</strong><small>Agregá comportamiento</small></span>
         </div>
         <span class="workflow-line"></span>
         <div class="workflow-step" data-step="export">
           <span class="workflow-number">3</span>
-          <span><strong>Exportar</strong><small>Elegí el formato</small></span>
+          <span><strong>Jugar y exportar</strong><small>Probá tu juego</small></span>
         </div>
       </nav>
       <section id="welcome-card" class="welcome-card" aria-labelledby="welcome-title">
-        <span class="material-symbols-rounded welcome-icon">deployed_code</span>
-        <p class="welcome-eyebrow">TU PRIMER MODELO 3D</p>
-        <h1 id="welcome-title">Empezá con una imagen</h1>
-        <p>Importá un PNG y lo ubicamos automáticamente en la escena. Después solo ajustás el volumen y exportás.</p>
+        <span class="material-symbols-rounded welcome-icon" aria-hidden="true">deployed_code</span>
+        <p class="welcome-eyebrow">TU PRIMER JUEGO 2.5D</p>
+        <h1 id="welcome-title">Creá un mundo jugable</h1>
+        <p>Empezá con un mapa, un jugador y una misión de ejemplo. Después sumá tus sprites, eventos y animaciones.</p>
         <div class="welcome-actions">
-          <button id="btn-quick-import" class="welcome-primary">
-            <span class="material-symbols-rounded">add_photo_alternate</span>
-            Elegir sprite PNG
+          <button id="btn-quick-game" class="welcome-primary">
+            <span class="material-symbols-rounded" aria-hidden="true">play_arrow</span>
+            Crear ejemplo jugable
           </button>
-          <button id="btn-quick-voxel" class="welcome-secondary">
-            <span class="material-symbols-rounded">data_object</span>
-            Importar JSON voxel
+          <button id="btn-quick-map" class="welcome-secondary">
+            <span class="material-symbols-rounded" aria-hidden="true">grid_on</span>
+            Pintar desde cero
           </button>
         </div>
-        <button id="btn-quick-demo" class="welcome-demo">O probá el editor con un cubo</button>
-        <small>También podés arrastrar archivos PNG, OBJ, FBX, GLB o DWG directamente acá.</small>
+        <details class="welcome-assets"><summary>Importar o modelar un recurso</summary>
+          <button id="btn-quick-import" class="welcome-demo">Importar sprite PNG</button>
+          <button id="btn-quick-voxel" class="welcome-demo">Importar JSON voxel</button>
+          <button id="btn-quick-demo" class="welcome-demo">Crear un cubo</button>
+        </details>
+        <small>WASD para mover · E para interactuar · tus recursos y herramientas de modelado siguen disponibles.</small>
       </section>
       <div id="context-hint" class="context-hint" aria-live="polite">
         <span class="material-symbols-rounded">lightbulb</span>
-        <span id="context-hint-text">Importá un sprite para empezar.</span>
+        <span id="context-hint-text">Creá un ejemplo jugable o pintá un mapa desde cero.</span>
       </div>
       <section id="relief-float-panel" class="relief-float-panel" hidden aria-live="polite">
         <div class="relief-float-header">

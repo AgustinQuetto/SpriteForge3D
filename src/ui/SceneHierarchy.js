@@ -1,8 +1,12 @@
+import { authoredParent } from '../core/AuthoringTransforms.js';
+
 /**
  * SceneHierarchy — Tree view with group (folder) support.
  * Groups render as collapsible folders; their children are indented.
  * Standalone meshes render as flat items below groups.
  */
+const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+
 export class SceneHierarchy {
   constructor(sceneManager) {
     this.sceneManager = sceneManager;
@@ -37,9 +41,9 @@ export class SceneHierarchy {
 
   refresh() {
     const sm = this.sceneManager;
-    const groups = sm.groups;
-    // Objects not parented to any scene group
-    const standalone = sm.objects.filter(obj => !obj.parent?.userData?.isSceneGroup);
+    const registered = new Set([...sm.groups, ...sm.objects]);
+    const groups = sm.groups.filter(group => !registered.has(authoredParent(group)));
+    const standalone = sm.objects.filter(obj => !registered.has(authoredParent(obj)));
 
     if (groups.length === 0 && standalone.length === 0) {
       this.container.innerHTML = '<div class="scene-empty">Todavía no hay objetos</div>';
@@ -59,6 +63,10 @@ export class SceneHierarchy {
     }
   }
 
+  _isEditable(object) {
+    return !this.sceneManager.canEditObject || this.sceneManager.canEditObject(object);
+  }
+
   _buildGroupItem(group) {
     const sm = this.sceneManager;
     const isSelected = sm.selectedObjects.includes(group);
@@ -75,11 +83,12 @@ export class SceneHierarchy {
     header.setAttribute('tabindex', '0');
     header.setAttribute('aria-expanded', String(isExpanded));
     header.setAttribute('aria-label', `Grupo ${group.name}`);
+    header.setAttribute('aria-disabled', String(!this._isEditable(group)));
 
     header.innerHTML = `
       <span class="material-symbols-rounded scene-expand-icon">${isExpanded ? 'expand_more' : 'chevron_right'}</span>
       <span class="material-symbols-rounded">${isExpanded ? 'folder_open' : 'folder'}</span>
-      <span class="scene-item-name">${group.name}</span>
+      <span class="scene-item-name">${escapeHTML(group.name)}</span>
       <span class="material-symbols-rounded scene-item-visibility" data-action="visibility">
         ${group.visible ? 'visibility' : 'visibility_off'}
       </span>
@@ -87,6 +96,7 @@ export class SceneHierarchy {
     `;
 
     header.addEventListener('click', (e) => {
+      if (!this._isEditable(group)) return;
       const action = e.target.closest('[data-action]')?.dataset.action;
       // Visibility toggle
       if (action === 'visibility') {
@@ -127,7 +137,8 @@ export class SceneHierarchy {
       const childrenEl = document.createElement('div');
       childrenEl.classList.add('scene-group-children');
 
-      for (const child of group.children) {
+      for (const child of [...sm.groups, ...sm.objects].filter(object => authoredParent(object) === group)) {
+        if (sm.groups.includes(child)) { childrenEl.appendChild(this._buildGroupItem(child)); continue; }
         if (child.isMesh || child.isGroup) {
           childrenEl.appendChild(this._buildObjectItem(child, true));
           const voxelSelection = this._buildVoxelSelectionItem(child, true);
@@ -153,6 +164,7 @@ export class SceneHierarchy {
     item.setAttribute('tabindex', '0');
     item.setAttribute('aria-selected', String(isSelected));
     item.setAttribute('aria-label', `Seleccionar ${obj.name || 'objeto sin nombre'}`);
+    item.setAttribute('aria-disabled', String(!this._isEditable(obj)));
 
     const iconMap = {
       box: 'deployed_code',
@@ -167,7 +179,7 @@ export class SceneHierarchy {
 
     item.innerHTML = `
       <span class="material-symbols-rounded">${icon}</span>
-      <span class="scene-item-name">${obj.name || 'Unnamed'}</span>
+      <span class="scene-item-name">${escapeHTML(obj.name || 'Unnamed')}</span>
       ${obj.userData.voxelized ? `<span class="scene-item-count" title="${obj.userData.voxelCount || 0} vóxeles">${obj.userData.voxelCount || 0}</span>` : ''}
       <span class="material-symbols-rounded scene-item-visibility" data-action="visibility">
         ${obj.visible ? 'visibility' : 'visibility_off'}
@@ -176,6 +188,7 @@ export class SceneHierarchy {
     `;
 
     item.addEventListener('click', (e) => {
+      if (!this._isEditable(obj)) return;
       const action = e.target.closest('[data-action]')?.dataset.action;
       if (action === 'visibility') {
         obj.visible = !obj.visible;
@@ -225,6 +238,7 @@ export class SceneHierarchy {
     `;
 
     item.addEventListener('click', (event) => {
+      if (!this._isEditable(obj)) return;
       sm.selectObject(obj, false);
       if (event.target.closest('[data-action="delete-voxels"]')) {
         if (this.onDeleteVoxels) this.onDeleteVoxels(obj);
@@ -245,6 +259,7 @@ export class SceneHierarchy {
     if (obj.userData.isSceneGroup) return;
     item.draggable = true;
     item.addEventListener('dragstart', (event) => {
+      if (!this._isEditable(obj)) { event.preventDefault(); return; }
       const selected = this.sceneManager.selectedObjects.filter(selectedObj => !selectedObj.userData?.isSceneGroup);
       this.draggedItems = selected.includes(obj) ? selected : [obj];
       event.dataTransfer.effectAllowed = 'move';
@@ -258,6 +273,7 @@ export class SceneHierarchy {
       this.draggedItems = [];
     });
     item.addEventListener('dragover', (event) => {
+      if (!this._isEditable(obj)) return;
       if (!this.draggedItems.length || this.draggedItems.includes(obj)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -266,11 +282,13 @@ export class SceneHierarchy {
     });
     item.addEventListener('dragleave', () => item.classList.remove('drop-target'));
     item.addEventListener('drop', (event) => {
+      if (!this._isEditable(obj)) return;
       if (!this.draggedItems.length || this.draggedItems.includes(obj)) return;
       event.preventDefault();
       event.stopPropagation();
       item.classList.remove('drop-target');
-      const parentGroup = obj.parent?.userData?.isSceneGroup ? obj.parent : null;
+      const parent = authoredParent(obj);
+      const parentGroup = parent?.userData?.isSceneGroup ? parent : null;
       if (parentGroup && this.onDropToGroup) this.onDropToGroup([...this.draggedItems], parentGroup);
       else if (this.onDropCreateGroup) this.onDropCreateGroup([...this.draggedItems], obj);
     });
@@ -278,6 +296,7 @@ export class SceneHierarchy {
 
   _configureGroupDropTarget(item, group) {
     item.addEventListener('dragover', (event) => {
+      if (!this._isEditable(group)) return;
       if (!this.draggedItems.length) return;
       event.preventDefault();
       event.stopPropagation();
@@ -286,6 +305,7 @@ export class SceneHierarchy {
     });
     item.addEventListener('dragleave', () => item.classList.remove('drop-target'));
     item.addEventListener('drop', (event) => {
+      if (!this._isEditable(group)) return;
       if (!this.draggedItems.length) return;
       event.preventDefault();
       event.stopPropagation();

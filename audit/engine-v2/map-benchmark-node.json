@@ -1,0 +1,28 @@
+{
+  "node": "v24.14.0",
+  "platform": "win32 x64",
+  "size": 64,
+  "objects": 4350,
+  "timings": {
+    "paintMs": 175.3,
+    "undoMs": 3.28,
+    "redoMs": 0.41,
+    "batchBuildMs": 299.68,
+    "runtimeCreateMs": 363.03,
+    "runtimeStartMs": 8.77
+  },
+  "batchPreparationMs": {
+    "median": 20.2,
+    "p95": 25.57
+  },
+  "simulationStepMs": {
+    "median": 1.1,
+    "p95": 3.18
+  },
+  "batches": {
+    "cells": 4348,
+    "batches": 28
+  },
+  "note": "CPU-only benchmark; batch preparation excludes GPU drawing. Use editor Rendimiento for actual drawing calls/frame times.",
+  "project": null
+}

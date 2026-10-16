@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { applyAssetSnap } from '../editor/AssetSnap.js';
+import { attachPreservingWorld } from './AuthoringTransforms.js';
+import { frameCamera } from './CameraFraming.js';
 
 function disposeObject3D(root) {
   root?.traverse?.(node => {
@@ -306,6 +308,7 @@ export class SceneManager {
     const dir = new THREE.DirectionalLight(0xffffff, 0.4);
     dir.position.set(5, 10, 5);
     this.scene.add(dir);
+    this.editorLights = [ambient, dir];
   }
 
   _initRaycaster() {
@@ -352,6 +355,13 @@ export class SceneManager {
 
     const infoEl = document.getElementById('info-camera');
     if (infoEl) infoEl.textContent = mode === 'perspective' ? 'Perspective' : 'Orthographic';
+  }
+
+  frameObjects(objects = this.selectedObjects.length ? this.selectedObjects : [this.exportGroup]) {
+    const damping = this.orbit.enableDamping; this.orbit.enableDamping = false; this.orbit.update();
+    const frame = frameCamera(this.camera, this.orbit.target, objects);
+    if (frame) { this.orbit.maxDistance = Math.max(2000, frame.distance * 4); this.orbit.update(); }
+    this.orbit.enableDamping = damping; return !!frame;
   }
 
   /**
@@ -502,6 +512,7 @@ export class SceneManager {
   }
 
   selectObject(mesh, additive = false) {
+    if (mesh && this.canEditObject && !this.canEditObject(mesh)) return;
     if (!additive) {
       this.deselectObject();
     }
@@ -559,8 +570,11 @@ export class SceneManager {
     this.tempSelectionGroup.updateMatrixWorld();
 
     this.selectedObjects.forEach(obj => {
+      for (let parent = obj.parent; parent; parent = parent.parent) {
+        if (this.selectedObjects.includes(parent)) return;
+      }
       obj.userData._origParent = obj.parent; // remember where to return it
-      this.tempSelectionGroup.attach(obj);
+      attachPreservingWorld(this.tempSelectionGroup, obj);
     });
   }
 
@@ -568,7 +582,7 @@ export class SceneManager {
     const objs = [...this.tempSelectionGroup.children];
     objs.forEach(obj => {
       const dest = obj.userData._origParent || this.exportGroup;
-      dest.attach(obj);
+      attachPreservingWorld(dest, obj);
       delete obj.userData._origParent;
     });
   }
@@ -579,18 +593,21 @@ export class SceneManager {
     this.mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
 
     this.raycaster.setFromCamera(this.mouse, this.camera);
-    const intersects = this.raycaster.intersectObjects(customObjects || this.objects, true);
+    const intersects = this.raycaster.intersectObjects(customObjects || this.objects, true)
+      .filter(hit => customObjects || !this.canEditObject || this.canEditObject(hit.object));
 
     if (intersects.length > 0) {
       const hit = intersects[0].object;
       if (!customObjects) {
         const object = hit.userData?.importedRoot || hit;
+        let resolved = this.objects.includes(object) ? object : null;
         let parent = object.parent;
         while (parent && parent !== this.exportGroup) {
-          if (parent.userData?.isSceneGroup) return parent;
+          if (parent.userData?.isSceneGroup && this.groups.includes(parent)) return parent;
+          if (this.objects.includes(parent)) resolved = parent;
           parent = parent.parent;
         }
-        return object;
+        return resolved;
       }
       return hit;
     }
@@ -618,7 +635,7 @@ export class SceneManager {
     this.groups.push(group);
 
     items.forEach(obj => {
-      group.attach(obj); // preserves world transform
+      attachPreservingWorld(group, obj);
     });
 
     return group;
@@ -627,9 +644,9 @@ export class SceneManager {
   dissolveGroup(group) {
     const children = [...group.children];
     children.forEach(obj => {
-      this.exportGroup.attach(obj); // back to exportGroup, world transform preserved
+      attachPreservingWorld(this.exportGroup, obj);
     });
-    this.exportGroup.remove(group);
+    group.removeFromParent();
     const idx = this.groups.indexOf(group);
     if (idx >= 0) this.groups.splice(idx, 1);
     return children;
@@ -639,7 +656,7 @@ export class SceneManager {
     if (!group) return;
     if (!this.groups.includes(group)) this.groups.push(group);
     if (group.parent !== this.exportGroup) this.exportGroup.add(group);
-    (children || []).forEach(child => group.attach(child));
+    (children || []).forEach(child => attachPreservingWorld(group, child));
   }
 
   removeGroup(group) {
@@ -672,7 +689,8 @@ export class SceneManager {
     this.mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
 
     this.raycaster.setFromCamera(this.mouse, this.camera);
-    const intersects = this.raycaster.intersectObjects(this.objects, true);
+    const intersects = this.raycaster.intersectObjects(this.objects, true)
+      .filter(hit => !this.canEditObject || this.canEditObject(hit.object));
     return intersects[0] ?? null;
   }
 
@@ -692,6 +710,7 @@ export class SceneManager {
   }
 
   _updateObjectCount() {
+    this.contentVersion = (this.contentVersion || 0) + 1;
     const el = document.getElementById('info-objects');
     if (el) el.textContent = `${this.objects.length} object${this.objects.length !== 1 ? 's' : ''}`;
   }
@@ -707,7 +726,8 @@ export class SceneManager {
 
   render() {
     this.orbit.update();
-    this.renderer.render(this.scene, this.camera);
+    if (this.renderScene) this.renderScene(this.renderer, this.camera);
+    else this.renderer.render(this.scene, this.camera);
   }
 
   dispose() {
